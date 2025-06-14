@@ -1,31 +1,64 @@
-# SimpleRAG
+# Enhanced SimpleRAG
 
-A Retrieval-Augmented Generation System for Document Q&A
+A Dual-Mode Retrieval-Augmented Generation System with Normal and Graph RAG Capabilities
 
-![SimpleRAG](https://via.placeholder.com/800x200?text=SimpleRAG)
+![Enhanced SimpleRAG](https://via.placeholder.com/800x200?text=Enhanced%20SimpleRAG)
 
 ## Overview
 
-SimpleRAG is a powerful document question-answering system that combines vector embeddings with large language models to provide accurate answers based on your documents. Upload PDFs, DOCX, TXT, or HTML files and ask questions in natural language to get relevant information extracted directly from your content.
+Enhanced SimpleRAG is an advanced document question-answering system that offers two powerful RAG modes: traditional semantic search and cutting-edge knowledge graph reasoning. Upload PDFs, DOCX, TXT, or HTML files and ask questions in natural language to get accurate, contextually-aware answers extracted directly from your content.
+
+## ✨ What's New in Enhanced SimpleRAG
+
+### 🕸️ Graph RAG Mode
+- **Entity Extraction**: Automatically identifies people, organizations, concepts, locations, and events
+- **Relationship Mapping**: Discovers and maps connections between entities
+- **Knowledge Graph**: Builds a NetworkX graph for advanced reasoning
+- **Hybrid Search**: Combines semantic search with graph traversal for richer context
+
+### 📚 Normal RAG Mode
+- **Fast Processing**: Traditional chunking and embedding for quick results
+- **Semantic Search**: Vector similarity search for relevant document sections
+- **Efficient Storage**: Optimized for speed and straightforward Q&A
 
 ## Features
 
-- 📚 **Document Indexing**: Upload and process PDF, TXT, DOCX, and HTML files
-- 🔍 **Semantic Search**: Find relevant document sections based on meaning, not just keywords
-- 🤖 **LLM Integration**: Get high-quality answers using Claude LLM or raw document extracts
-- ⚡ **Performance Optimizations**: Embedding cache and rate limiting for faster responses
-- 📈 **Progress Tracking**: Real-time progress indicators for long-running operations
-- 🔧 **Configurable**: Adjust chunk sizes, overlap, and other parameters to fit your needs
+### Core Capabilities
+- 📄 **Multi-Format Support**: Process PDF, TXT, DOCX, and HTML files
+- 🔄 **Dual RAG Modes**: Switch between Normal and Graph RAG based on your needs
+- 🤖 **LLM Integration**: High-quality answers using Claude LLM
+- 🗄️ **Advanced Storage**: Dual Qdrant collections for documents and graph elements
+- ⚡ **Performance Optimizations**: Embedding cache, rate limiting, and progress tracking
+- 🔧 **Admin Interface**: Comprehensive collection management and debugging tools
+
+### Enhanced Features
+- 🧠 **Knowledge Graph Reasoning**: Understand relationships and connections
+- 🔍 **Hybrid Search**: Combine document content with entity relationships
+- 📊 **Real-time Progress**: Detailed progress tracking for complex operations
+- 🛠️ **Advanced Configuration**: Fine-tune entity extraction and graph parameters
+- 📈 **System Monitoring**: Health checks and status monitoring
 
 ## Architecture
 
-SimpleRAG employs a classic RAG (Retrieval-Augmented Generation) architecture:
+Enhanced SimpleRAG employs a sophisticated dual-mode architecture:
 
-1. **Document Processing**: Documents are parsed, extracted, and split into chunks with configurable overlap
-2. **Vector Embeddings**: Each chunk is converted into a vector embedding using the Gemini API
-3. **Vector Storage**: Embeddings are stored in Qdrant vector database for efficient similarity search
-4. **Query Processing**: When you ask a question, it's converted to an embedding and used to find the most similar chunks
-5. **LLM Integration**: The most relevant chunks are sent to Claude LLM along with your question to generate a comprehensive answer
+### Normal RAG Flow
+1. **Document Processing**: Parse and extract text from uploaded files
+2. **Text Chunking**: Split documents into overlapping chunks
+3. **Vector Embeddings**: Generate embeddings using Gemini API
+4. **Vector Storage**: Store in primary Qdrant collection
+5. **Semantic Search**: Find similar chunks using vector similarity
+6. **Answer Generation**: Use Claude LLM with retrieved context
+
+### Graph RAG Flow
+1. **Document Processing**: Parse and extract text from uploaded files
+2. **Context-Rich Chunking**: Create larger chunks for better entity context
+3. **Entity Extraction**: Use Gemini to identify entities and relationships
+4. **Knowledge Graph**: Build NetworkX graph with entities as nodes, relationships as edges
+5. **Graph Embeddings**: Generate embeddings for entities and relationships
+6. **Dual Storage**: Store documents in primary collection, graph elements in graph collection
+7. **Hybrid Search**: Search both document chunks and graph elements
+8. **Enhanced Answer Generation**: Use Claude with both document and graph context
 
 ## Installation
 
@@ -33,16 +66,16 @@ SimpleRAG employs a classic RAG (Retrieval-Augmented Generation) architecture:
 
 - Python 3.8+
 - API keys for:
-  - Gemini API (required for embeddings)
-  - Claude API (optional, for LLM-generated answers)
-  - Qdrant Cloud (optional, for vector database)
+  - **Gemini API** (required for embeddings and entity extraction)
+  - **Claude API** (optional, for LLM-generated answers)
+  - **Qdrant Cloud** (required for vector database)
 
 ### Quick Install (macOS/Linux)
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/simplerag.git
-cd simplerag
+git clone https://github.com/yourusername/enhanced-simplerag.git
+cd enhanced-simplerag
 
 # Run installation script
 ./install.sh
@@ -59,69 +92,201 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
 # Configure your API keys
-python simplerag.py config --gemini-key YOUR_GEMINI_API_KEY --claude-key YOUR_CLAUDE_API_KEY
+python simplerag.py config --gemini-key YOUR_GEMINI_API_KEY --claude-key YOUR_CLAUDE_API_KEY --qdrant-key YOUR_QDRANT_KEY --qdrant-url YOUR_QDRANT_URL
 ```
 
 ## Usage
 
 ### Web Interface
 
-SimpleRAG provides a web interface for easy document uploading and querying:
+Enhanced SimpleRAG provides an intuitive web interface with admin capabilities:
 
 ```bash
 # Start the web server
 python app.py
 ```
 
-Then navigate to http://localhost:5001 in your browser.
+Navigate to http://localhost:5001 and access:
+- **Home**: Overview and mode selection
+- **Upload**: Document indexing with RAG mode selection
+- **Query**: Question answering with mode switching
+- **Settings**: Configuration and RAG mode preferences
+- **Advanced**: System information and performance details
+- **Admin**: Collection management and debugging tools
 
 ### Command Line
 
 ```bash
-# Configure API keys
-simplerag config --gemini-key YOUR_GEMINI_API_KEY --claude-key YOUR_CLAUDE_API_KEY
+# Configure API keys and RAG mode
+simplerag config --gemini-key YOUR_GEMINI_API_KEY --rag-mode graph
 
-# Index a document
-simplerag index /path/to/document.pdf
+# Index a document in Graph RAG mode
+simplerag index /path/to/document.pdf --mode graph
 
-# Ask a question
-simplerag query "What is the main theme of the document?"
+# Query using Graph RAG
+simplerag query "How are Company A and Company B related?" --mode graph
+
+# Switch to Normal RAG for faster queries
+simplerag query "What is the revenue?" --mode normal
 ```
 
 ## Configuration
 
-Configure SimpleRAG through the web interface in the Settings tab or via command line:
+### Basic Configuration
+
+Configure through the web interface Settings tab or via command line:
 
 ```bash
-simplerag config --chunk-size 1000 --chunk-overlap 200 --top-k 5 --preferred-llm claude
+# Set RAG mode and basic parameters
+simplerag config --rag-mode graph --chunk-size 1000 --top-k 5
+
+# Configure Graph RAG specific settings
+simplerag config --max-entities-per-chunk 20 --graph-reasoning-depth 2
 ```
 
 ### Key Parameters
 
-- `chunk_size`: Size of text chunks in characters (500-5000 recommended)
-- `chunk_overlap`: Overlap between adjacent chunks (50-500 recommended)
-- `top_k`: Number of results to retrieve for each query (1-20)
-- `preferred_llm`: Choose between `claude` or `raw` (document extracts only)
+#### Normal RAG Settings
+- `chunk_size`: Size of text chunks in characters (500-5000)
+- `chunk_overlap`: Overlap between chunks (50-500)
+- `top_k`: Number of results to retrieve (1-20)
+
+#### Graph RAG Settings
+- `max_entities_per_chunk`: Maximum entities to extract per chunk (5-50)
+- `graph_reasoning_depth`: Relationship hops to consider (1-5)
+- `entity_similarity_threshold`: Threshold for merging entities (0.5-1.0)
+
+#### Performance Settings
+- `rate_limit`: API calls per minute (10-300)
+- `enable_cache`: Enable embedding caching (true/false)
+- `preferred_llm`: Choose between `claude` or `raw`
+
+## RAG Mode Comparison
+
+| Feature | Normal RAG | Graph RAG |
+|---------|------------|-----------|
+| **Speed** | Fast ⚡ | Slower but thorough 🧠 |
+| **Processing** | Simple chunking | Entity extraction + graph building |
+| **Storage** | Single collection | Dual collections (docs + graph) |
+| **Best For** | Direct facts, simple Q&A | Relationships, complex reasoning |
+| **Use Cases** | "What is the revenue?" | "How are X and Y connected?" |
 
 ## Advanced Features
 
-### Rate Limiting
+### Knowledge Graph Construction
 
-SimpleRAG implements rate limiting for API calls to prevent exceeding API provider quotas and avoid service interruptions. The system automatically throttles requests if they exceed the configured limit.
+Graph RAG automatically:
+- Extracts entities (people, organizations, concepts, locations, events)
+- Identifies relationships between entities
+- Builds a NetworkX graph for traversal and analysis
+- Stores graph elements with semantic embeddings
 
-### Embedding Cache
+### Hybrid Search Strategy
 
-To improve performance and reduce API costs, SimpleRAG can cache embeddings locally. When the same text needs to be embedded multiple times, the system will use the cached version instead of making additional API calls.
+When using Graph RAG, the system:
+1. Searches document chunks for direct content matches
+2. Searches graph elements for entity and relationship matches
+3. Combines results for comprehensive context
+4. Generates answers using both document and graph information
 
-### Progress Tracking
+### Admin Interface
 
-For long-running operations like indexing large documents, SimpleRAG provides real-time progress indicators that show the current status of the operation.
+Access `/admin` for:
+- **System Status**: Real-time service health monitoring
+- **Collection Management**: Create, inspect, and delete Qdrant collections
+- **Debug Tools**: Test queries and inspect search results
+- **Performance Metrics**: Monitor API usage and cache effectiveness
+
+### Rate Limiting & Caching
+
+- **Smart Rate Limiting**: Prevents API quota exhaustion with automatic throttling
+- **Embedding Cache**: Reduces costs by caching frequently used embeddings
+- **Progress Tracking**: Real-time updates for long-running operations
+
+## API Endpoints
+
+Enhanced SimpleRAG provides RESTful API endpoints:
+
+```bash
+# System status
+GET /api/system/status
+
+# RAG mode management
+GET /api/rag-mode
+POST /api/rag-mode {"mode": "graph"}
+
+# Collection management
+GET /api/admin/qdrant/collections
+POST /api/admin/qdrant/collections {"type": "graph"}
+DELETE /api/admin/qdrant/collections/{name}
+
+# Progress tracking
+GET /api/progress/{operation_type}
+```
+
+## Use Cases
+
+### Normal RAG - Perfect For:
+- ✅ Quick factual queries
+- ✅ Direct information extraction
+- ✅ Simple document search
+- ✅ Performance-critical applications
+
+### Graph RAG - Ideal For:
+- 🧠 Understanding relationships between entities
+- 🔗 "How are X and Y connected?" questions
+- 📊 Complex multi-entity queries
+- 🎯 Contextual reasoning and inference
+
+## Example Queries
+
+```bash
+# Normal RAG queries
+"What is TechCorp's revenue?"
+"Who is the CEO?"
+"What products does the company offer?"
+
+# Graph RAG queries  
+"How are TechCorp and Microsoft related?"
+"What partnerships exist between the mentioned companies?"
+"Who are the key people involved in the acquisitions?"
+"What is the relationship between Sarah Chen and the board members?"
+```
 
 ## Troubleshooting
 
-- **No results returned**: Check that your document was properly indexed and that your questions are related to the document content
-- **Slow performance**: Consider enabling the embedding cache and adjusting the chunk size
-- **Indexing errors**: For large documents, try decreasing the chunk size or increasing the timeout value
+### Common Issues
+
+**No results in Graph RAG mode:**
+- Check that both document and graph collections exist in admin panel
+- Verify entity extraction is working in the debug console
+- Try simpler queries first to test connectivity
+
+**Slow Graph RAG performance:**
+- Reduce `max_entities_per_chunk` for faster processing
+- Enable embedding cache to reduce API calls
+- Consider using Normal RAG for simple queries
+
+**Collection errors:**
+- Use the admin interface to recreate collections
+- Check Qdrant connection status
+- Verify API keys are correctly configured
+
+### Debug Tools
+
+Access the admin panel (`/admin`) for:
+- Collection inspection and management
+- Query debugging with result scoring
+- System status and error monitoring
+- Cache management and clearing
+
+## Performance Tips
+
+1. **Choose the Right Mode**: Use Normal RAG for simple queries, Graph RAG for relationship questions
+2. **Enable Caching**: Significantly reduces API costs and improves speed
+3. **Optimize Chunk Size**: Larger chunks for Graph RAG, smaller for Normal RAG
+4. **Monitor Progress**: Use the real-time progress indicators for long operations
+5. **Use Admin Tools**: Regular collection maintenance improves performance
 
 ## License
 
@@ -129,7 +294,20 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Acknowledgments
 
-- [Anthropic Claude](https://www.anthropic.com/claude) for LLM capabilities
+- [Anthropic Claude](https://www.anthropic.com/claude) for advanced language modeling
+- [Google Gemini](https://ai.google.dev/) for embedding generation and entity extraction
+- [Qdrant](https://qdrant.tech/) for high-performance vector storage
+- [NetworkX](https://networkx.org/) for knowledge graph construction
+
+## Contributing
+
+Contributions are welcome! Areas of particular interest:
+- Additional entity types and relationship patterns
+- Performance optimizations for large knowledge graphs
+- Integration with other vector databases
+- Enhanced visualization of knowledge graphs
+
+Please feel free to submit a Pull Request or open an issue for discussion.
 - [Google Gemini](https://ai.google.dev/) for embedding generation
 - [Qdrant](https://qdrant.tech/) for vector storage
 
