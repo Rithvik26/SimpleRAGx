@@ -4,36 +4,87 @@
 
 {% block content %}
 <div class="jumbotron">
-    <h1 class="display-4">SimpleRAG</h1>
-    <p class="lead">A Retrieval-Augmented Generation System for Document Q&A</p>
+    <h1 class="display-4">Enhanced SimpleRAG</h1>
+    <p class="lead">A Retrieval-Augmented Generation System with Normal and Graph RAG modes</p>
     <hr class="my-4">
     
     {% if is_configured %}
+        <!-- NEW: Add current RAG mode display -->
+        <div class="alert alert-info">
+            <strong>Current RAG Mode:</strong> 
+            <span class="badge bg-{{ 'success' if config.rag_mode == 'graph' else 'primary' }}">
+                {{ config.rag_mode|title }} RAG
+            </span>
+            {% if config.rag_mode == 'normal' %}
+                - Traditional semantic search with document chunks
+            {% else %}
+                - Knowledge graph with entities and relationships
+            {% endif %}
+        </div>
+        
         <p>Your system is configured and ready to use. Start by uploading documents or asking questions.</p>
         <div class="d-grid gap-2 d-sm-flex justify-content-sm-center mt-4">
             <a href="{{ url_for('upload') }}" class="btn btn-primary btn-lg px-4 me-sm-3">Upload Documents</a>
             <a href="{{ url_for('query') }}" class="btn btn-outline-secondary btn-lg px-4">Ask Questions</a>
         </div>
     {% else %}
-        <p>Welcome to SimpleRAG! To get started, you need to configure your API keys.</p>
+        <p>Welcome to Enhanced SimpleRAG! To get started, you need to configure your API keys.</p>
         <div class="d-grid gap-2 d-sm-flex justify-content-sm-center mt-4">
             <a href="{{ url_for('setup') }}" class="btn btn-primary btn-lg px-4">Configure System</a>
         </div>
     {% endif %}
 </div>
 
+<!-- NEW: Add RAG mode comparison cards -->
 <div class="row mt-5">
+    <div class="col-md-6">
+        <div class="card h-100">
+            <div class="card-header bg-primary text-white">
+                <h4 class="mb-0">📚 Normal RAG</h4>
+            </div>
+            <div class="card-body">
+                <h5>Traditional Semantic Search</h5>
+                <ul>
+                    <li>Document chunking and embedding</li>
+                    <li>Vector similarity search</li>
+                    <li>Fast and efficient</li>
+                    <li>Best for straightforward Q&A</li>
+                </ul>
+                <p class="text-muted">Perfect for simple document retrieval and question answering.</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card h-100">
+            <div class="card-header bg-success text-white">
+                <h4 class="mb-0">🕸️ Graph RAG</h4>
+            </div>
+            <div class="card-body">
+                <h5>Knowledge Graph Enhancement</h5>
+                <ul>
+                    <li>Entity and relationship extraction</li>
+                    <li>Knowledge graph reasoning</li>
+                    <li>Contextual understanding</li>
+                    <li>Best for complex queries</li>
+                </ul>
+                <p class="text-muted">Ideal for understanding connections and relationships in your documents.</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-4">
     <div class="col-md-4">
-        <h3>📚 Document Indexing</h3>
+        <h3>📄 Document Support</h3>
         <p>Upload PDF, TXT, DOCX, and HTML files to create a searchable knowledge base.</p>
     </div>
     <div class="col-md-4">
-        <h3>🔍 Semantic Search</h3>
-        <p>Ask questions in natural language and get relevant information from your documents.</p>
+        <h3>🔍 Intelligent Search</h3>
+        <p>Choose between traditional semantic search or advanced graph-based reasoning.</p>
     </div>
     <div class="col-md-4">
         <h3>🤖 LLM Integration</h3>
-        <p>Get high-quality answers using Claude or other LLMs based on your documents.</p>
+        <p>Get high-quality answers using Claude with context from your chosen RAG mode.</p>
     </div>
 </div>
 {% endblock %}

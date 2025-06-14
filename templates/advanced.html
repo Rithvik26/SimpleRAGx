@@ -15,6 +15,15 @@
                 <th>Setting</th>
                 <th>Value</th>
             </tr>
+            <!-- NEW: Add RAG Mode display -->
+            <tr>
+                <td>RAG Mode</td>
+                <td>
+                    <span class="badge bg-{{ 'success' if config.rag_mode == 'graph' else 'primary' }}">
+                        {{ config.rag_mode|title }} RAG
+                    </span>
+                </td>
+            </tr>
             <tr>
                 <td>Embedding Model</td>
                 <td>Gemini Embedding API</td>
@@ -22,6 +31,15 @@
             <tr>
                 <td>Vector Database</td>
                 <td>Qdrant Cloud</td>
+            </tr>
+            <!-- NEW: Add collection information -->
+            <tr>
+                <td>Document Collection</td>
+                <td>{{ config.collection_name }}</td>
+            </tr>
+            <tr>
+                <td>Graph Collection</td>
+                <td>{{ config.graph_collection_name }}</td>
             </tr>
             <tr>
                 <td>Preferred LLM</td>
@@ -47,7 +65,53 @@
                 <td>Embedding Cache</td>
                 <td>{{ "Enabled" if config.enable_cache else "Disabled" }}</td>
             </tr>
+            <!-- NEW: Add Graph RAG specific settings -->
+            {% if config.rag_mode == 'graph' %}
+            <tr>
+                <td>Max Entities per Chunk</td>
+                <td>{{ config.max_entities_per_chunk }}</td>
+            </tr>
+            <tr>
+                <td>Graph Reasoning Depth</td>
+                <td>{{ config.graph_reasoning_depth }}</td>
+            </tr>
+            <tr>
+                <td>Entity Similarity Threshold</td>
+                <td>{{ config.entity_similarity_threshold }}</td>
+            </tr>
+            {% endif %}
         </table>
+    </div>
+</div>
+
+<!-- NEW: Add RAG Mode Comparison -->
+<div class="card mb-4">
+    <div class="card-header">
+        <h5>RAG Mode Comparison</h5>
+    </div>
+    <div class="card-body">
+        <div class="row">
+            <div class="col-md-6">
+                <h6 class="text-primary">📚 Normal RAG</h6>
+                <ul>
+                    <li><strong>Speed:</strong> Fast processing</li>
+                    <li><strong>Accuracy:</strong> Good for direct facts</li>
+                    <li><strong>Use Case:</strong> Simple Q&A, document search</li>
+                    <li><strong>Storage:</strong> Single vector collection</li>
+                    <li><strong>Processing:</strong> Chunking + embedding</li>
+                </ul>
+            </div>
+            <div class="col-md-6">
+                <h6 class="text-success">🕸️ Graph RAG</h6>
+                <ul>
+                    <li><strong>Speed:</strong> Slower, more thorough</li>
+                    <li><strong>Accuracy:</strong> Excellent for relationships</li>
+                    <li><strong>Use Case:</strong> Complex reasoning, connections</li>
+                    <li><strong>Storage:</strong> Two collections (docs + graph)</li>
+                    <li><strong>Processing:</strong> Entity extraction + graph building</li>
+                </ul>
+            </div>
+        </div>
     </div>
 </div>
 
@@ -57,13 +121,17 @@
     </div>
     <div class="card-body">
         <h6>1. Rate Limiting</h6>
-        <p>SimpleRAG implements rate limiting for API calls to prevent exceeding API provider quotas and avoid service interruptions. The system automatically throttles requests if they exceed the configured limit.</p>
+        <p>SimpleRAG implements rate limiting for API calls to prevent exceeding API provider quotas and avoid service interruptions. This is especially important for Graph RAG which makes additional API calls for entity extraction.</p>
         
         <h6>2. Embedding Cache</h6>
-        <p>To improve performance and reduce API costs, SimpleRAG can cache embeddings locally. When the same text needs to be embedded multiple times, the system will use the cached version instead of making additional API calls.</p>
+        <p>To improve performance and reduce API costs, SimpleRAG caches embeddings locally. This is particularly beneficial for Graph RAG where similar entities might be processed multiple times.</p>
         
         <h6>3. Progress Tracking</h6>
-        <p>For long-running operations like indexing large documents, SimpleRAG provides real-time progress indicators that show the current status of the operation.</p>
+        <p>For long-running operations like Graph RAG indexing, SimpleRAG provides detailed real-time progress indicators showing entity extraction, relationship mapping, and graph building status.</p>
+        
+        <!-- NEW: Add Graph RAG specific feature -->
+        <h6>4. Dual Collection Storage</h6>
+        <p>Graph RAG uses two Qdrant collections: one for document chunks and another for graph elements (entities and relationships), enabling hybrid search strategies.</p>
     </div>
 </div>
 
@@ -72,31 +140,72 @@
         <h5>How It Works</h5>
     </div>
     <div class="card-body">
-        <h6>1. Document Processing</h6>
-        <p>Documents are parsed, extracted, and split into chunks of text with some overlap.</p>
+        <!-- NEW: Split into two columns for comparison -->
+        <div class="row">
+            <div class="col-md-6">
+                <h6 class="text-primary">Normal RAG Process</h6>
+                <ol>
+                    <li>Document parsing and text extraction</li>
+                    <li>Split into overlapping chunks</li>
+                    <li>Generate embeddings using Gemini API</li>
+                    <li>Store in Qdrant vector database</li>
+                    <li>Query with semantic similarity search</li>
+                    <li>Generate answer with Claude LLM</li>
+                </ol>
+            </div>
+            <div class="col-md-6">
+                <h6 class="text-success">Graph RAG Process</h6>
+                <ol>
+                    <li>Document parsing and text extraction</li>
+                    <li>Split into larger, context-rich chunks</li>
+                    <li>Extract entities and relationships using Gemini</li>
+                    <li>Build knowledge graph with NetworkX</li>
+                    <li>Generate embeddings for graph elements</li>
+                    <li>Store both docs and graph in Qdrant</li>
+                    <li>Query both collections for hybrid results</li>
+                    <li>Generate context-aware answer with Claude</li>
+                </ol>
+            </div>
+        </div>
+    </div>
+</div>
 
-        <h6>2. Vector Embeddings</h6>
-        <p>Each chunk is converted into a vector embedding using the Gemini API.</p>
-
-        <h6>3. Vector Storage</h6>
-        <p>Embeddings are stored in Qdrant vector database for efficient similarity search.</p>
-
-        <h6>4. Query Processing</h6>
-        <p>When you ask a question, it's converted to an embedding and used to find the most similar chunks.</p>
-
-        <h6>5. LLM Integration</h6>
-        <p>The most relevant chunks are sent to Claude LLM along with your question to generate a comprehensive answer.</p>
+<!-- NEW: Add Graph RAG Technical Details -->
+<div class="card mb-4">
+    <div class="card-header">
+        <h5>Graph RAG Technical Details</h5>
+    </div>
+    <div class="card-body">
+        <h6>Entity Extraction</h6>
+        <p>Uses Gemini Pro to identify and categorize entities (PERSON, ORGANIZATION, CONCEPT, LOCATION, EVENT) from document text with descriptions and relationships.</p>
+        
+        <h6>Knowledge Graph Construction</h6>
+        <p>Builds a NetworkX graph where entities are nodes and relationships are edges, enabling graph traversal and neighborhood analysis for enhanced context retrieval.</p>
+        
+        <h6>Hybrid Search Strategy</h6>
+        <p>Combines traditional semantic search of document chunks with graph-based entity and relationship retrieval, providing both direct facts and contextual connections.</p>
+        
+        <h6>Enhanced Prompting</h6>
+        <p>Graph RAG generates specialized prompts that include both document context and relevant entities/relationships, enabling more sophisticated reasoning and answer generation.</p>
     </div>
 </div>
 
 <div class="card mb-4">
     <div class="card-header">
-        <h5>About SimpleRAG</h5>
+        <h5>About Enhanced SimpleRAG</h5>
     </div>
     <div class="card-body">
-        <p>SimpleRAG is a Retrieval-Augmented Generation system for document Q&A. It allows you to create a searchable knowledge base from your documents and ask questions in natural language.</p>
+        <!-- UPDATED: Enhanced description -->
+        <p>Enhanced SimpleRAG extends the original system with Graph RAG capabilities, providing two complementary approaches to document Q&A:</p>
         
-        <p>This web application is a simple interface for the SimpleRAG system. For more advanced usage, you can use the command-line interface or integrate it into your own applications.</p>
+        <ul>
+            <li><strong>Normal RAG:</strong> Fast, efficient semantic search perfect for direct factual queries</li>
+            <li><strong>Graph RAG:</strong> Advanced knowledge graph reasoning ideal for understanding relationships and complex connections</li>
+        </ul>
+        
+        <p>Both modes use the same Gemini API key for embeddings and Claude for answer generation, with Qdrant storing the vector representations. The system automatically handles the complexity of entity extraction, graph construction, and hybrid retrieval strategies.</p>
+        
+        <p>This dual-mode approach ensures you get the best of both worlds: speed when you need it, and depth when your queries demand sophisticated reasoning about relationships and connections in your documents.</p>
     </div>
 </div>
 {% endblock %}

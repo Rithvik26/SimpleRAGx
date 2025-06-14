@@ -4,11 +4,12 @@ import tempfile
 import logging
 import json
 import threading
-from werkzeug.utils import secure_filename
-import markdown
 import re
-# Import SimpleRAG core components
-from simplerag import SimpleRAG
+import markdown
+from werkzeug.utils import secure_filename
+
+# Import enhanced SimpleRAG - Updated to use the new class name
+from simplerag import EnhancedSimpleRAG
 from extensions import ProgressTracker
 
 app = Flask(__name__)
@@ -18,12 +19,14 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max upload size
 
 @app.template_filter('nl2br')
 def nl2br_filter(text):
+    """Convert newlines to HTML breaks and process markdown."""
     if not text:
         return ""
-    # First convert <br> tags to newlines
+    # First convert <br> tags to newlines if any
     text = re.sub(r'<br\s*/?>', '\n', text)
     # Convert markdown to HTML
-    return markdown.markdown(text)
+    html = markdown.markdown(text)
+    return html
 
 # Ensure upload directory exists
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -35,248 +38,404 @@ logger = logging.getLogger('SimpleRAG-Web')
 # Configuration path
 CONFIG_PATH = os.path.join(tempfile.gettempdir(), 'simplerag_config.json')
 
-# Default configuration
+# Enhanced default configuration with Graph RAG support
 DEFAULT_CONFIG = {
     "gemini_api_key": "",
     "claude_api_key": "",
     "qdrant_url": "https://3cbcacc0-1fe5-42a1-8be0-81515a21771b.us-west-2-0.aws.cloud.qdrant.io",
     "qdrant_api_key": "",
     "collection_name": "simple_rag_docs",
+    "graph_collection_name": "simple_rag_graph",
     "embedding_dimension": 768,
     "chunk_size": 1000,
     "chunk_overlap": 200,
     "top_k": 5,
     "preferred_llm": "claude",
-    "rate_limit": 60,  # Max API calls per minute
-    "enable_cache": True,  # Enable embedding cache
-    "cache_dir": None  # Default cache directory
+    "rag_mode": "normal",  # "normal" or "graph"
+    "rate_limit": 60,
+    "enable_cache": True,
+    "cache_dir": None,
+    # Graph RAG specific settings
+    "max_entities_per_chunk": 20,
+    "relationship_extraction_prompt": "extract_relationships",
+    "graph_reasoning_depth": 2,
+    "entity_similarity_threshold": 0.8
 }
 
-# SimpleRAG instance
+# Global SimpleRAG instance
 simplerag_instance = None
 
 def load_config():
     """Load configuration from file or use default."""
     if os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH, 'r') as f:
-            return json.load(f)
+        try:
+            with open(CONFIG_PATH, 'r') as f:
+                config = json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"Error loading config: {e}. Using defaults.")
+            config = DEFAULT_CONFIG.copy()
     else:
-        # Write default config if not exists
-        with open(CONFIG_PATH, 'w') as f:
-            json.dump(DEFAULT_CONFIG, f, indent=2)
-        return DEFAULT_CONFIG
+        config = DEFAULT_CONFIG.copy()
+        # Create config file with defaults
+        try:
+            with open(CONFIG_PATH, 'w') as f:
+                json.dump(config, f, indent=2)
+        except IOError as e:
+            logger.warning(f"Could not save default config: {e}")
+    
+    # Ensure all new config options are present
+    config_updated = False
+    for key, value in DEFAULT_CONFIG.items():
+        if key not in config:
+            config[key] = value
+            config_updated = True
+    
+    # Save updated config if new options were added
+    if config_updated:
+        try:
+            save_config(config)
+        except Exception as e:
+            logger.warning(f"Could not save updated config: {e}")
+    
+    return config
 
 def save_config(config):
     """Save configuration to file."""
-    with open(CONFIG_PATH, 'w') as f:
-        json.dump(config, f, indent=2)
+    try:
+        with open(CONFIG_PATH, 'w') as f:
+            json.dump(config, f, indent=2)
+        logger.info("Configuration saved successfully")
+    except IOError as e:
+        logger.error(f"Error saving configuration: {e}")
+        raise
 
 def initialize_services():
     """Initialize SimpleRAG services based on configuration."""
     global simplerag_instance
     
-    # Initialize SimpleRAG
-    simplerag_instance = SimpleRAG()
-
+    try:
+        # Initialize Enhanced SimpleRAG
+        simplerag_instance = EnhancedSimpleRAG()
+        
+        # Check if services were properly initialized
+        if simplerag_instance.vector_db_service is None:
+            logger.warning("Vector DB service not initialized - check Qdrant configuration")
+            return False
+        
+        logger.info("SimpleRAG services initialized successfully")
+        
+        # Set RAG mode from config
+        config = load_config()
+        rag_mode = config.get("rag_mode", "normal")
+        simplerag_instance.set_rag_mode(rag_mode)
+        logger.info(f"RAG mode set to: {rag_mode}")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error initializing SimpleRAG services: {e}")
+        simplerag_instance = None
+        return False
 def index_document_background(file_path, session_id=None):
-    """Index document in the background."""
+    """Index document in the background with comprehensive error handling."""
     global simplerag_instance
     
     try:
         if simplerag_instance:
-            simplerag_instance.index_document(file_path, session_id)
+            logger.info(f"Starting background indexing for: {file_path}")
+            success = simplerag_instance.index_document(file_path, session_id)
+            
+            if success:
+                logger.info(f"Successfully indexed: {file_path}")
+            else:
+                logger.warning(f"Indexing returned False for: {file_path}")
+                
+        else:
+            logger.error("SimpleRAG instance not available for indexing")
+            if session_id:
+                tracker = ProgressTracker.get_tracker(session_id, "index_document")
+                if tracker:
+                    tracker.update(100, 100, status="error", 
+                                 message="SimpleRAG services not initialized")
+                    
     except Exception as e:
-        logger.error(f"Background indexing error: {str(e)}")
-        # Update progress tracker with error if exists
+        logger.error(f"Background indexing error for {file_path}: {str(e)}")
         if session_id:
             tracker = ProgressTracker.get_tracker(session_id, "index_document")
             if tracker:
-                tracker.update(100, 100, status="error", message=f"Error: {str(e)}")
+                tracker.update(100, 100, status="error", 
+                             message=f"Indexing error: {str(e)}")
+    finally:
+        # Clean up temporary file
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                logger.info(f"Cleaned up temporary file: {file_path}")
+        except Exception as e:
+            logger.warning(f"Could not clean up file {file_path}: {e}")
 
-def process_query(question, session_id=None):
-    """Query the indexed documents and return an answer."""
+def process_query_background(question, session_id=None):
+    """Process query in background with progress tracking."""
+    global simplerag_instance
+    
+    try:
+        if not simplerag_instance:
+            result = "SimpleRAG services not initialized. Please configure API keys."
+        else:
+            logger.info(f"Processing background query: {question[:50]}...")
+            result = simplerag_instance.query(question, session_id)
+            logger.info("Background query processing completed")
+        
+        # Store result in session-based storage
+        if session_id:
+            # Store result for retrieval
+            session_results = getattr(process_query_background, 'results', {})
+            session_results[session_id] = result
+            process_query_background.results = session_results
+            
+            # Update progress tracker
+            progress_tracker = ProgressTracker.get_tracker(session_id, "query")
+            if progress_tracker:
+                progress_tracker.update(100, 100, status="complete", 
+                                      message="Query processing complete")
+                
+    except Exception as e:
+        logger.error(f"Background query error: {str(e)}")
+        error_message = f"Error processing query: {str(e)}"
+        
+        if session_id:
+            # Store error result
+            session_results = getattr(process_query_background, 'results', {})
+            session_results[session_id] = error_message
+            process_query_background.results = session_results
+            
+            # Update progress tracker with error
+            progress_tracker = ProgressTracker.get_tracker(session_id, "query")
+            if progress_tracker:
+                progress_tracker.update(100, 100, status="error", 
+                                      message=f"Query error: {str(e)}")
+
+def process_query_sync(question, session_id=None):
+    """Process query synchronously for quick responses."""
     global simplerag_instance
     
     if not simplerag_instance:
-        return "Services not initialized. Please configure API keys."
+        return "SimpleRAG services not initialized. Please configure API keys."
     
     try:
-        # Create a progress tracker for the query
+        logger.info(f"Processing sync query: {question[:50]}...")
+        
+        # Create progress tracker for sync queries too
         if session_id:
             progress_tracker = ProgressTracker(session_id, "query")
             progress_tracker.update(0, 100, status="starting", 
                                    message="Processing your question")
         
-        # Generate embedding for the query
-        logger.info(f"Generating embedding for query: {question}")
-        query_embedding = simplerag_instance.embedding_service.get_embedding(question)
-        
-        # Update progress
-        if session_id:
-            progress_tracker.update(25, 100, status="searching", 
-                                   message="Searching for relevant contexts")
-        
-        # Retrieve similar contexts
-        logger.info(f"Searching for relevant contexts")
-        contexts = simplerag_instance.vector_db_service.search_similar(
-            query_embedding,
-            top_k=simplerag_instance.config["top_k"]
-        )
-        
-        if not contexts:
-            logger.warning("No relevant contexts found")
-            if session_id:
-                progress_tracker.update(100, 100, status="complete", 
-                                      message="No relevant information found")
-            return "I couldn't find any relevant information to answer your question."
-        
-        # Update progress
-        if session_id:
-            progress_tracker.update(50, 100, status="generating", 
-                                   message="Generating answer based on relevant documents")
-        
-        # Generate answer
-        if simplerag_instance.llm_service and simplerag_instance.config["preferred_llm"] != "raw":
-            logger.info(f"Generating answer using LLM")
-            # Get the answer from LLM
-            answer = simplerag_instance.llm_service.generate_answer(question, contexts)
-            
-            # Process answer to ensure proper formatting
-            # Replace HTML <br> tags with markdown line breaks
-            answer = re.sub(r'<br\s*/?>', '\n\n', answer)
-            
-            # Clean other HTML tags but preserve content
-            answer = re.sub(r'<[^>]*>', '', answer)
-            
-        else:
-            # If no LLM, just return the relevant chunks
-            logger.info(f"No LLM configured, returning raw chunks")
-            results = []
-            for i, ctx in enumerate(contexts):
-                results.append(f"### Result {i+1} (Score: {ctx['score']:.2f})")
-                results.append(f"**Source**: {ctx['metadata'].get('filename', 'Unknown')}")
-                results.append("")  # Empty line
-                results.append(ctx['text'])
-                results.append("")  # Empty line
-            answer = "\n".join(results)
-        
-        # Update progress
-        if session_id:
-            progress_tracker.update(100, 100, status="complete", 
-                                   message="Answer generation complete")
-        
-        return answer
+        result = simplerag_instance.query(question, session_id)
+        logger.info("Sync query processing completed")
+        return result
         
     except Exception as e:
-        logger.error(f"Error processing query: {str(e)}")
-        # Update progress with error
-        if session_id:
-            progress_tracker = ProgressTracker.get_tracker(session_id, "query")
-            if progress_tracker:
-                progress_tracker.update(100, 100, status="error", 
-                                      message=f"Error: {str(e)}")
+        logger.error(f"Sync query error: {str(e)}")
         return f"Error processing your query: {str(e)}"
 
 @app.route('/')
 def home():
-    """Render home page."""
-    # Generate a session ID if not exists
+    """Render home page with current configuration status."""
+    # Generate session ID if not exists
     if 'session_id' not in session:
         session['session_id'] = os.urandom(16).hex()
     
     config = load_config()
     is_configured = bool(config.get("gemini_api_key"))
     
+    # Get current RAG mode status
+    current_mode = "Unknown"
+    if simplerag_instance:
+        current_mode = simplerag_instance.rag_mode
+    
     return render_template('index.html', 
                           is_configured=is_configured, 
-                          config=config)
+                          config=config,
+                          current_mode=current_mode)
+
 @app.route('/health')
 def health_check():
-    return "OK", 200
+    """Health check endpoint."""
+    status = {
+        "status": "OK",
+        "simplerag_initialized": simplerag_instance is not None,
+        "rag_mode": simplerag_instance.rag_mode if simplerag_instance else "Unknown"
+    }
+    return jsonify(status), 200
 
 @app.route('/setup', methods=['GET', 'POST'])
 def setup():
-    """Configure API keys."""
+    """Configure API keys and RAG mode settings."""
     if request.method == 'POST':
         config = load_config()
+        config_changed = False
         
-        # Update config with form values
-        config["gemini_api_key"] = request.form.get("gemini_api_key", "")
-        config["claude_api_key"] = request.form.get("claude_api_key", "")
-        config["qdrant_api_key"] = request.form.get("qdrant_api_key", "")
-        config["qdrant_url"] = request.form.get("qdrant_url", DEFAULT_CONFIG["qdrant_url"])
-        config["preferred_llm"] = request.form.get("preferred_llm", "claude")
+        # Update API keys
+        for key in ["gemini_api_key", "claude_api_key", "qdrant_api_key", "qdrant_url"]:
+            new_value = request.form.get(key, "").strip()
+            if new_value != config.get(key, ""):
+                config[key] = new_value
+                config_changed = True
         
-        # Advanced settings
+        # Update LLM and RAG mode settings
+        for key in ["preferred_llm", "rag_mode"]:
+            new_value = request.form.get(key, "").strip()
+            if new_value and new_value != config.get(key, ""):
+                config[key] = new_value
+                config_changed = True
+        
+        # Update advanced settings with validation
         try:
-            config["chunk_size"] = int(request.form.get("chunk_size", 1000))
-            config["chunk_overlap"] = int(request.form.get("chunk_overlap", 200))
-            config["top_k"] = int(request.form.get("top_k", 5))
-            config["rate_limit"] = int(request.form.get("rate_limit", 60))
-            config["enable_cache"] = bool(request.form.get("enable_cache", True))
-        except ValueError:
-            flash("Invalid values for numeric fields. Using defaults.")
+            numeric_settings = {
+                "chunk_size": (100, 5000, 1000),
+                "chunk_overlap": (0, 1000, 200),
+                "top_k": (1, 20, 5),
+                "rate_limit": (10, 300, 60),
+                "max_entities_per_chunk": (5, 50, 20),
+                "graph_reasoning_depth": (1, 5, 2)
+            }
+            
+            for key, (min_val, max_val, default_val) in numeric_settings.items():
+                try:
+                    new_value = int(request.form.get(key, default_val))
+                    new_value = max(min_val, min(max_val, new_value))  # Clamp to range
+                    if new_value != config.get(key, default_val):
+                        config[key] = new_value
+                        config_changed = True
+                except (ValueError, TypeError):
+                    flash(f"Invalid value for {key}, using default", "warning")
+            
+            # Handle float settings
+            try:
+                threshold = float(request.form.get("entity_similarity_threshold", 0.8))
+                threshold = max(0.5, min(1.0, threshold))  # Clamp to 0.5-1.0
+                if threshold != config.get("entity_similarity_threshold", 0.8):
+                    config["entity_similarity_threshold"] = threshold
+                    config_changed = True
+            except (ValueError, TypeError):
+                flash("Invalid entity similarity threshold, using default", "warning")
+            
+            # Handle boolean settings
+            enable_cache = bool(request.form.get("enable_cache"))
+            if enable_cache != config.get("enable_cache", True):
+                config["enable_cache"] = enable_cache
+                config_changed = True
+                
+        except Exception as e:
+            logger.error(f"Error updating advanced settings: {e}")
+            flash("Error updating some advanced settings", "warning")
         
-        save_config(config)
-        initialize_services()
+        # Save configuration if changed
+        if config_changed:
+            try:
+                save_config(config)
+                
+                # Reinitialize services with new config
+                initialize_services()
+                
+                flash("Configuration saved and services reinitialized successfully!", "success")
+            except Exception as e:
+                logger.error(f"Error saving configuration: {e}")
+                flash("Error saving configuration", "danger")
+        else:
+            flash("No changes detected in configuration", "info")
         
-        flash("Configuration saved successfully!")
         return redirect(url_for('home'))
     
     return render_template('setup.html', config=load_config())
 
 @app.route('/upload', methods=['GET', 'POST'])
 def upload():
-    """Handle document uploads."""
+    """Handle document uploads with RAG mode selection."""
     if request.method == 'POST':
-        # Check if any file was uploaded
+        # Validate file upload
         if 'document' not in request.files:
-            flash('No file part')
+            flash('No file part', 'danger')
             return redirect(request.url)
         
         file = request.files['document']
         
-        # Check if file was selected
         if file.filename == '':
-            flash('No selected file')
+            flash('No selected file', 'danger')
             return redirect(request.url)
         
-        # Check if file is allowed
+        # Validate file type
         allowed_extensions = {'pdf', 'txt', 'docx', 'html', 'htm'}
         if '.' not in file.filename or file.filename.rsplit('.', 1)[1].lower() not in allowed_extensions:
-            flash('File type not supported. Please upload PDF, TXT, DOCX, or HTML files.')
+            flash('File type not supported. Please upload PDF, TXT, DOCX, or HTML files.', 'danger')
             return redirect(request.url)
         
-        # Save the file temporarily
-        filename = secure_filename(file.filename)
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(file_path)
+        # Get RAG mode for this upload
+        upload_rag_mode = request.form.get('rag_mode', 'normal')
+        if upload_rag_mode not in ['normal', 'graph']:
+            upload_rag_mode = 'normal'
         
-        # Start indexing in a background thread
+        # Check if SimpleRAG is initialized
+        if not simplerag_instance:
+            flash('SimpleRAG not initialized. Please configure API keys first.', 'danger')
+            return redirect(url_for('setup'))
+        
+        # Update RAG mode if different from current
+        current_mode = simplerag_instance.rag_mode
+        if upload_rag_mode != current_mode:
+            try:
+                simplerag_instance.set_rag_mode(upload_rag_mode)
+                config = load_config()
+                config["rag_mode"] = upload_rag_mode
+                save_config(config)
+                logger.info(f"RAG mode changed from {current_mode} to {upload_rag_mode}")
+            except Exception as e:
+                logger.error(f"Error changing RAG mode: {e}")
+                flash(f"Error changing RAG mode: {e}", 'warning')
+        
+        # Save the file
+        try:
+            filename = secure_filename(file.filename)
+            file_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{session.get('session_id', 'unknown')}_{filename}")
+            file.save(file_path)
+            logger.info(f"File saved: {file_path}")
+        except Exception as e:
+            logger.error(f"Error saving file: {e}")
+            flash(f"Error saving file: {e}", 'danger')
+            return redirect(request.url)
+        
+        # Start indexing in background
         session_id = session.get('session_id')
         
-        # Start a progress tracker
+        # Create progress tracker
         progress_tracker = ProgressTracker(session_id, "index_document")
         progress_tracker.update(0, 100, status="starting", 
-                               message=f"Starting to index {filename}")
+                               message=f"Starting to index {filename} in {upload_rag_mode} mode")
         
-        # Start background thread for indexing
-        indexing_thread = threading.Thread(
-            target=index_document_background,
-            args=(file_path, session_id)
-        )
-        indexing_thread.daemon = True
-        indexing_thread.start()
-        
-        flash(f"Document upload successful. Indexing {filename} in progress.", 'success')
-        
-        return redirect(url_for('upload_progress'))
+        # Start background indexing thread
+        try:
+            indexing_thread = threading.Thread(
+                target=index_document_background,
+                args=(file_path, session_id),
+                daemon=True
+            )
+            indexing_thread.start()
+            
+            flash(f"Document '{filename}' uploaded successfully. Indexing in {upload_rag_mode} mode.", 'success')
+            return redirect(url_for('upload_progress'))
+            
+        except Exception as e:
+            logger.error(f"Error starting indexing thread: {e}")
+            flash(f"Error starting document processing: {e}", 'danger')
+            return redirect(request.url)
     
-    return render_template('upload.html')
+    config = load_config()
+    return render_template('upload.html', config=config)
 
 @app.route('/upload/progress')
 def upload_progress():
-    """Show document upload progress."""
+    """Show document upload progress page."""
     return render_template('upload_progress.html')
 
 @app.route('/api/progress/<operation_type>')
@@ -294,292 +453,630 @@ def get_progress(operation_type):
 
 @app.route('/query', methods=['GET', 'POST'])
 def query():
-    """Handle document querying."""
+    """Handle document querying with RAG mode selection."""
     answer = None
     question = None
     in_progress = False
     
     if request.method == 'POST':
-        question = request.form.get('question', '')
-        if question:
-            session_id = session.get('session_id')
+        question = request.form.get('question', '').strip()
+        query_rag_mode = request.form.get('rag_mode', None)
+        
+        if not question:
+            flash('Please enter a question', 'warning')
+            config = load_config()
+            return render_template('query.html', config=config)
+        
+        if not simplerag_instance:
+            flash('SimpleRAG not initialized. Please configure API keys first.', 'danger')
+            return redirect(url_for('setup'))
+        
+        # Switch RAG mode if specified for this query
+        if query_rag_mode and query_rag_mode in ['normal', 'graph']:
+            current_mode = simplerag_instance.rag_mode
+            if query_rag_mode != current_mode:
+                try:
+                    simplerag_instance.set_rag_mode(query_rag_mode)
+                    logger.info(f"RAG mode temporarily changed to {query_rag_mode} for this query")
+                except Exception as e:
+                    logger.error(f"Error changing RAG mode: {e}")
+                    flash(f"Error changing RAG mode: {e}", 'warning')
+        
+        session_id = session.get('session_id')
+        
+        # Create progress tracker
+        progress_tracker = ProgressTracker(session_id, "query")
+        progress_tracker.update(0, 100, status="starting", 
+                               message="Processing your question")
+        
+        # Determine if we should use async processing
+        current_mode = simplerag_instance.rag_mode if simplerag_instance else "normal"
+        use_async = (
+            len(question) > 100 or 
+            request.form.get('async', 'false') == 'true' or 
+            current_mode == 'graph'
+        )
+        
+        if use_async:
+            # Process query asynchronously
+            in_progress = True
             
-            # Create a progress tracker for the query
-            progress_tracker = ProgressTracker(session_id, "query")
-            progress_tracker.update(0, 100, status="starting", 
-                                   message="Processing your question")
-            
-            # Start query in background thread if it's a long query
-            if len(question) > 100 or request.form.get('async', 'false') == 'true':
-                in_progress = True
-                
-                # Process query in background
-                def process_query_background():
-                    try:
-                        result = process_query(question, session_id)
-                        # Store result in session
-                        session['last_query_result'] = result
-                        # Update progress tracker
-                        progress_tracker = ProgressTracker.get_tracker(session_id, "query")
-                        if progress_tracker:
-                            progress_tracker.update(100, 100, status="complete", 
-                                                  message="Query processing complete")
-                    except Exception as e:
-                        logger.error(f"Background query error: {str(e)}")
-                        # Update progress tracker with error
-                        progress_tracker = ProgressTracker.get_tracker(session_id, "query")
-                        if progress_tracker:
-                            progress_tracker.update(100, 100, status="error", 
-                                                  message=f"Error: {str(e)}")
-                
-                query_thread = threading.Thread(target=process_query_background)
-                query_thread.daemon = True
+            try:
+                query_thread = threading.Thread(
+                    target=process_query_background,
+                    args=(question, session_id),
+                    daemon=True
+                )
                 query_thread.start()
-            else:
-                # Process query synchronously for short questions
-                answer = process_query(question, session_id)
+                logger.info("Started async query processing")
+                
+            except Exception as e:
+                logger.error(f"Error starting query thread: {e}")
+                flash(f"Error processing query: {e}", 'danger')
+                in_progress = False
+        else:
+            # Process query synchronously for quick responses
+            try:
+                answer = process_query_sync(question, session_id)
+                logger.info("Completed sync query processing")
+            except Exception as e:
+                logger.error(f"Error in sync query processing: {e}")
+                answer = f"Error processing your query: {str(e)}"
     
+    config = load_config()
     return render_template('query.html', 
                           question=question, 
                           answer=answer, 
-                          in_progress=in_progress)
+                          in_progress=in_progress,
+                          config=config)
 
 @app.route('/api/query/result')
 def get_query_result():
     """API endpoint to get the result of an asynchronous query."""
-    result = session.get('last_query_result')
+    session_id = session.get('session_id')
+    if not session_id:
+        return jsonify({"error": "No session found"}), 404
+    
+    # Get result from background processing
+    session_results = getattr(process_query_background, 'results', {})
+    result = session_results.get(session_id)
+    
     if result:
-        # Clear from session
-        session.pop('last_query_result', None)
+        # Clear the result after retrieval
+        del session_results[session_id]
         return jsonify({"result": result})
+    
     return jsonify({"error": "No result available"}), 404
 
 @app.route('/advanced')
 def advanced():
-    """Advanced settings and information."""
-    return render_template('advanced.html', config=load_config())
-
-def create_templates():
-    """Create template files for the Flask app."""
-    os.makedirs('templates', exist_ok=True)
-    os.makedirs('static', exist_ok=True)
+    """Advanced settings and system information."""
+    config = load_config()
     
-    # Base template
-    with open('templates/base.html', 'w') as f:
-        f.write('''<!DOCTYPE html>
+    # Add system status information
+    system_status = {
+        "simplerag_initialized": simplerag_instance is not None,
+        "current_rag_mode": simplerag_instance.rag_mode if simplerag_instance else "Unknown",
+        "config_file_exists": os.path.exists(CONFIG_PATH),
+        "upload_folder_exists": os.path.exists(app.config['UPLOAD_FOLDER'])
+    }
+    
+    return render_template('advanced.html', config=config, system_status=system_status)
+
+@app.route('/api/rag-mode', methods=['GET', 'POST'])
+def rag_mode_api():
+    """API endpoint to get or set RAG mode."""
+    if request.method == 'POST':
+        try:
+            data = request.get_json()
+            mode = data.get('mode')
+            
+            if mode not in ['normal', 'graph']:
+                return jsonify({"error": "Invalid RAG mode. Must be 'normal' or 'graph'"}), 400
+            
+            if not simplerag_instance:
+                return jsonify({"error": "SimpleRAG not initialized"}), 500
+            
+            # Update SimpleRAG instance
+            old_mode = simplerag_instance.rag_mode
+            simplerag_instance.set_rag_mode(mode)
+            
+            # Update and save config
+            config = load_config()
+            config["rag_mode"] = mode
+            save_config(config)
+            
+            logger.info(f"RAG mode changed from {old_mode} to {mode} via API")
+            return jsonify({"success": True, "mode": mode, "previous_mode": old_mode})
+            
+        except Exception as e:
+            logger.error(f"Error changing RAG mode via API: {e}")
+            return jsonify({"error": f"Error changing RAG mode: {str(e)}"}), 500
+    else:
+        # GET request - return current mode
+        if simplerag_instance:
+            current_mode = simplerag_instance.rag_mode
+        else:
+            config = load_config()
+            current_mode = config.get("rag_mode", "normal")
+        
+        return jsonify({
+            "mode": current_mode,
+            "simplerag_initialized": simplerag_instance is not None
+        })
+
+# Replace the system status route in app.py with this improved version
+
+@app.route('/api/system/status')
+def system_status():
+    """Enhanced API endpoint for system status information."""
+    config = load_config()
+    
+    # Get SimpleRAG status
+    simplerag_status = {
+        "initialized": simplerag_instance is not None,
+        "ready": False,
+        "errors": []
+    }
+    
+    if simplerag_instance:
+        if hasattr(simplerag_instance, 'get_status'):
+            simplerag_status.update(simplerag_instance.get_status())
+        else:
+            # Fallback status check
+            simplerag_status["ready"] = (
+                hasattr(simplerag_instance, 'vector_db_service') and 
+                simplerag_instance.vector_db_service is not None
+            )
+    
+    # Check Qdrant connection specifically
+    qdrant_status = {
+        "configured": bool(config.get("qdrant_url")) and bool(config.get("qdrant_api_key")),
+        "connected": False,
+        "error": None
+    }
+    
+    if simplerag_instance and simplerag_instance.vector_db_service:
+        try:
+            collections = simplerag_instance.vector_db_service.client.get_collections()
+            qdrant_status["connected"] = True
+            qdrant_status["collection_count"] = len(collections.collections)
+        except Exception as e:
+            qdrant_status["error"] = str(e)
+    
+    status = {
+        "simplerag_initialized": simplerag_status["initialized"],
+        "simplerag_ready": simplerag_status["ready"],
+        "current_rag_mode": simplerag_instance.rag_mode if simplerag_instance else "Unknown",
+        "api_keys_configured": {
+            "gemini": bool(config.get("gemini_api_key")),
+            "claude": bool(config.get("claude_api_key")),
+            "qdrant": bool(config.get("qdrant_api_key"))
+        },
+        "qdrant": qdrant_status,
+        "services": simplerag_status.get("services", {}),
+        "initialization_errors": simplerag_status.get("errors", []),
+        "config": {
+            "rag_mode": config.get("rag_mode", "normal"),
+            "preferred_llm": config.get("preferred_llm", "claude"),
+            "chunk_size": config.get("chunk_size", 1000),
+            "top_k": config.get("top_k", 5),
+            "qdrant_url": config.get("qdrant_url", "Not configured")
+        },
+        "collections": {
+            "normal": config.get("collection_name", "simple_rag_docs"),
+            "graph": config.get("graph_collection_name", "simple_rag_graph")
+        }
+    }
+    
+    return jsonify(status)
+
+@app.route('/admin/qdrant')
+def qdrant_admin():
+    """Serve the Qdrant admin interface."""
+    # You can either render the admin.html template or serve the standalone HTML
+    # For now, let's serve the standalone version
+    from flask import send_from_directory, make_response
+    import os
+    
+    # Create the admin HTML content directly
+    admin_html_content = """
+<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}SimpleRAG{% endblock %}</title>
+    <title>Qdrant Admin - Collection Management</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        .status-indicator { width: 12px; height: 12px; border-radius: 50%; display: inline-block; margin-right: 8px; }
+        .status-success { background-color: #28a745; }
+        .status-warning { background-color: #ffc107; }
+        .status-error { background-color: #dc3545; }
+        .collection-card { border-left: 4px solid; margin-bottom: 1rem; }
+        .collection-normal { border-left-color: #007bff; }
+        .collection-graph { border-left-color: #28a745; }
+        .collection-other { border-left-color: #6c757d; }
+    </style>
 </head>
 <body>
-    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
-        <div class="container">
-            <a class="navbar-brand" href="/">SimpleRAG</a>
-            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
-                <span class="navbar-toggler-icon"></span>
-            </button>
-            <div class="collapse navbar-collapse" id="navbarNav">
-                <ul class="navbar-nav">
-                    <li class="nav-item">
-                        <a class="nav-link" href="/">Home</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="/upload">Upload</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="/query">Query</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="/setup">Settings</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="/advanced">Advanced</a>
-                    </li>
-                </ul>
-            </div>
-        </div>
-    </nav>
-
-    <main class="container mt-4">
-        {% with messages = get_flashed_messages(with_categories=true) %}
-            {% if messages %}
-                {% for category, message in messages %}
-                    <div class="alert alert-{{ category if category != 'message' else 'info' }}">
-                        {{ message }}
-                    </div>
-                {% endfor %}
-            {% endif %}
-        {% endwith %}
-
-        {% block content %}{% endblock %}
-    </main>
-
-    <footer class="container mt-5 text-center text-muted">
-        <hr>
-        <p>SimpleRAG - A Retrieval-Augmented Generation System</p>
-    </footer>
-
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
-    {% block scripts %}{% endblock %}
-</body>
-</html>''')
+    <!-- Insert the full HTML content from the qdrant_admin_ui artifact here -->
+""" + open('path/to/qdrant_admin_ui.html', 'r').read().split('<body>')[1] if os.path.exists('path/to/qdrant_admin_ui.html') else ""
     
-    # Create upload progress template
-    with open('templates/upload_progress.html', 'w') as f:
-        f.write('''{% extends "base.html" %}
+    # For simplicity, let's just return the template
+    return render_template('qdrant_admin.html')
+@app.errorhandler(413)
+def file_too_large(error):
+    """Handle file too large error."""
+    flash('File too large. Maximum size is 16MB.', 'danger')
+    return redirect(url_for('upload'))
 
-{% block title %}SimpleRAG - Upload Progress{% endblock %}
+@app.errorhandler(404)
+def not_found_error(error):
+    """Handle 404 errors."""
+    return render_template('404.html'), 404
 
-{% block content %}
-<h2>Upload Progress</h2>
-<p>Your document is being indexed. This process may take a few minutes depending on the document size.</p>
-
-<div class="card mt-4">
-    <div class="card-header">
-        <h5>Indexing Progress</h5>
-    </div>
-    <div class="card-body">
-        <div class="progress mb-3">
-            <div id="progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" 
-                 role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" style="width: 0%">
-                0%
-            </div>
-        </div>
-        
-        <div id="status-message" class="alert alert-info">
-            Starting indexing process...
-        </div>
-        
-        <div class="text-center mt-3">
-            <div id="loading-spinner" class="spinner-border text-primary" role="status">
-                <span class="visually-hidden">Loading...</span>
-            </div>
-        </div>
-        
-        <div class="mt-3">
-            <p>Document: <span id="current-file">Preparing...</span></p>
-        </div>
-        
-        <div class="d-grid gap-2 d-md-flex justify-content-md-end mt-4">
-            <a href="{{ url_for('query') }}" class="btn btn-outline-primary" id="finish-button" style="display: none;">
-                Continue to Ask Questions
-            </a>
-        </div>
-    </div>
-</div>
-{% endblock %}
-
-{% block scripts %}
-<script>
-    // Poll for indexing progress
-    let pollInterval;
-    let completed = false;
-    
-    function updateProgress() {
-        fetch('/api/progress/index_document')
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error('Progress information not available');
-                }
-                return response.json();
-            })
-            .then(data => {
-                // Update progress bar
-                const percentage = data.percentage || 0;
-                const progressBar = document.getElementById('progress-bar');
-                progressBar.style.width = `${percentage}%`;
-                progressBar.textContent = `${percentage}%`;
-                progressBar.setAttribute('aria-valuenow', percentage);
-                
-                // Update status message
-                const statusMessage = document.getElementById('status-message');
-                statusMessage.textContent = data.message || 'Processing...';
-                
-                // Update current file
-                const currentFile = document.getElementById('current-file');
-                currentFile.textContent = data.current_file || 'Processing...';
-                
-                // Handle completion or error
-                if (data.status === 'complete') {
-                    completeProcess(true, data.message);
-                } else if (data.status === 'error') {
-                    completeProcess(false, data.message);
-                }
-            })
-            .catch(error => {
-                console.error('Error fetching progress:', error);
-            });
-    }
-    
-    function completeProcess(success, message) {
-        if (!completed) {
-            completed = true;
-            clearInterval(pollInterval);
-            
-            // Hide spinner
-            document.getElementById('loading-spinner').style.display = 'none';
-            
-            // Update progress bar
-            const progressBar = document.getElementById('progress-bar');
-            progressBar.classList.remove('progress-bar-animated', 'progress-bar-striped');
-            
-            if (success) {
-                progressBar.classList.add('bg-success');
-                progressBar.style.width = '100%';
-                progressBar.textContent = '100%';
-                
-                // Update status message
-                const statusMessage = document.getElementById('status-message');
-                statusMessage.classList.remove('alert-info');
-                statusMessage.classList.add('alert-success');
-                statusMessage.textContent = message || 'Document indexed successfully!';
-                
-                // Show finish button
-                document.getElementById('finish-button').style.display = 'block';
-            } else {
-                progressBar.classList.add('bg-danger');
-                
-                // Update status message
-                const statusMessage = document.getElementById('status-message');
-                statusMessage.classList.remove('alert-info');
-                statusMessage.classList.add('alert-danger');
-                statusMessage.textContent = message || 'An error occurred during indexing.';
-            }
-        }
-    }
-    
-    // Start polling when page loads
-    document.addEventListener('DOMContentLoaded', function() {
-        // Start polling immediately
-        updateProgress();
-        
-        // Then poll every second
-        pollInterval = setInterval(updateProgress, 1000);
-        
-        // Set a timeout to stop polling after 10 minutes
-        setTimeout(function() {
-            if (!completed) {
-                clearInterval(pollInterval);
-                completeProcess(false, 'Indexing timed out. The document might be too large or complex.');
-            }
-        }, 10 * 60 * 1000);
-    });
-</script>
-{% endblock %}''')
-
-    # Create the remaining templates and static files from the provided definitions
-    return True
+@app.errorhandler(500)
+def internal_error(error):
+    """Handle internal server errors."""
+    logger.error(f"Internal server error: {error}")
+    return render_template('500.html'), 500
 
 # Initialize services on startup
-initialize_services()
+try:
+    initialize_services()
+    logger.info("Flask app initialized with SimpleRAG services")
+except Exception as e:
+    logger.error(f"Error during app initialization: {e}")
 
 if __name__ == '__main__':
-    # Create template files if they don't exist
-    create_templates()
+    # Development server settings
+    debug_mode = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
+    port = int(os.environ.get('PORT', 5001))
+    host = os.environ.get('HOST', '0.0.0.0')
     
-    # Start Flask development server
-    app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 5001)))
+    logger.info(f"Starting Flask app on {host}:{port} (debug={debug_mode})")
+    app.run(debug=debug_mode, host=host, port=port)
+
+# Add these routes to your app.py file
+# Add these corrected routes to your app.py file, replacing the existing admin routes
+
+@app.route('/admin')
+def admin_panel():
+    """Admin panel for system management."""
+    return render_template('admin.html')
+
+@app.route('/admin/qdrant')
+def qdrant_admin():
+    """Qdrant collection management interface."""
+    return render_template('qdrant_admin.html')
+
+@app.route('/api/admin/qdrant/status')
+def qdrant_status():
+    """Get Qdrant connection status and basic info."""
+    try:
+        # Check if SimpleRAG is initialized
+        if not simplerag_instance:
+            return jsonify({
+                "connected": False,
+                "error": "SimpleRAG not initialized"
+            })
+        
+        # Check if vector DB service exists
+        if not simplerag_instance.vector_db_service:
+            return jsonify({
+                "connected": False,
+                "error": "Vector DB service not available"
+            })
+        
+        # Test connection by getting collections
+        collections_response = simplerag_instance.vector_db_service.client.get_collections()
+        
+        return jsonify({
+            "connected": True,
+            "url": simplerag_instance.vector_db_service.qdrant_url,
+            "collection_count": len(collections_response.collections)
+        })
+        
+    except Exception as e:
+        logger.error(f"Qdrant status check failed: {str(e)}")
+        return jsonify({
+            "connected": False,
+            "error": f"Connection failed: {str(e)}"
+        })
+
+@app.route('/api/admin/qdrant/collections')
+def list_collections():
+    """List all Qdrant collections with details."""
+    try:
+        # Check if SimpleRAG is initialized
+        if not simplerag_instance:
+            return jsonify({"error": "SimpleRAG not initialized"}), 500
+        
+        # Check if vector DB service exists
+        if not simplerag_instance.vector_db_service:
+            return jsonify({"error": "Vector DB service not available"}), 500
+        
+        # Get collections with proper error handling
+        try:
+            collections_response = simplerag_instance.vector_db_service.client.get_collections()
+        except Exception as e:
+            logger.error(f"Failed to get collections: {str(e)}")
+            return jsonify({"error": f"Failed to get collections: {str(e)}"}), 500
+        
+        collections_info = []
+        config = load_config()
+        
+        for collection in collections_response.collections:
+            try:
+                # Get collection info with better error handling
+                info = simplerag_instance.vector_db_service.client.get_collection(collection.name)
+                
+                # Extract metrics safely
+                vectors_count = 0
+                indexed_vectors_count = 0
+                points_count = 0
+                
+                # Handle different Qdrant client versions
+                if hasattr(info, 'vectors_count'):
+                    vectors_count = info.vectors_count or 0
+                if hasattr(info, 'indexed_vectors_count'):
+                    indexed_vectors_count = info.indexed_vectors_count or 0
+                if hasattr(info, 'points_count'):
+                    points_count = info.points_count or 0
+                
+                # Extract config safely
+                config_info = {"distance": "cosine", "size": 768}  # defaults
+                try:
+                    if hasattr(info, 'config') and info.config:
+                        if hasattr(info.config, 'params') and info.config.params:
+                            if hasattr(info.config.params, 'vectors'):
+                                vectors_config = info.config.params.vectors
+                                if hasattr(vectors_config, 'distance'):
+                                    distance = vectors_config.distance
+                                    config_info["distance"] = distance.value if hasattr(distance, 'value') else str(distance)
+                                if hasattr(vectors_config, 'size'):
+                                    config_info["size"] = vectors_config.size
+                except Exception as config_error:
+                    logger.warning(f"Error extracting config for {collection.name}: {config_error}")
+                
+                collections_info.append({
+                    "name": collection.name,
+                    "vectors_count": vectors_count,
+                    "indexed_vectors_count": indexed_vectors_count,
+                    "points_count": points_count,
+                    "config": config_info
+                })
+                
+            except Exception as e:
+                logger.error(f"Error getting info for collection {collection.name}: {str(e)}")
+                # Add collection with error info
+                collections_info.append({
+                    "name": collection.name,
+                    "vectors_count": 0,
+                    "indexed_vectors_count": 0,
+                    "points_count": 0,
+                    "config": {"distance": "unknown", "size": 0},
+                    "error": str(e)
+                })
+        
+        return jsonify({
+            "collections": collections_info,
+            "normal_collection": config.get("collection_name", "simple_rag_docs"),
+            "graph_collection": config.get("graph_collection_name", "simple_rag_graph")
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in list_collections: {str(e)}")
+        return jsonify({"error": f"Failed to list collections: {str(e)}"}), 500
+
+@app.route('/api/admin/qdrant/collections', methods=['POST'])
+def create_collection():
+    """Create a new collection."""
+    try:
+        if not simplerag_instance or not simplerag_instance.vector_db_service:
+            return jsonify({"error": "SimpleRAG not initialized"}), 500
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+        
+        collection_type = data.get('type', 'normal')
+        
+        config = load_config()
+        
+        if collection_type == 'normal':
+            collection_name = config["collection_name"]
+        elif collection_type == 'graph':
+            collection_name = config["graph_collection_name"]
+        else:
+            return jsonify({"error": "Invalid collection type. Must be 'normal' or 'graph'"}), 400
+        
+        # Create collection
+        try:
+            created = simplerag_instance.vector_db_service.ensure_collection_exists(collection_name)
+            return jsonify({
+                "success": True,
+                "collection_name": collection_name,
+                "created": created,
+                "message": f"Collection '{collection_name}' {'created' if created else 'already exists'}"
+            })
+        except Exception as e:
+            logger.error(f"Failed to create collection {collection_name}: {str(e)}")
+            return jsonify({"error": f"Failed to create collection: {str(e)}"}), 500
+        
+    except Exception as e:
+        logger.error(f"Error in create_collection: {str(e)}")
+        return jsonify({"error": f"Collection creation failed: {str(e)}"}), 500
+
+@app.route('/api/admin/qdrant/collections/<collection_name>', methods=['DELETE'])
+def delete_collection(collection_name):
+    """Delete a collection."""
+    try:
+        if not simplerag_instance or not simplerag_instance.vector_db_service:
+            return jsonify({"error": "SimpleRAG not initialized"}), 500
+        
+        # Validate collection name
+        if not collection_name or not collection_name.strip():
+            return jsonify({"error": "Invalid collection name"}), 400
+        
+        # Delete collection
+        try:
+            simplerag_instance.vector_db_service.client.delete_collection(collection_name)
+            return jsonify({
+                "success": True,
+                "message": f"Collection '{collection_name}' deleted successfully"
+            })
+        except Exception as e:
+            logger.error(f"Failed to delete collection {collection_name}: {str(e)}")
+            return jsonify({"error": f"Failed to delete collection: {str(e)}"}), 500
+        
+    except Exception as e:
+        logger.error(f"Error in delete_collection: {str(e)}")
+        return jsonify({"error": f"Collection deletion failed: {str(e)}"}), 500
+
+@app.route('/api/admin/qdrant/collections/<collection_name>/inspect')
+def inspect_collection(collection_name):
+    """Get detailed information about a collection."""
+    try:
+        if not simplerag_instance or not simplerag_instance.vector_db_service:
+            return jsonify({"error": "SimpleRAG not initialized"}), 500
+        
+        # Validate collection name
+        if not collection_name or not collection_name.strip():
+            return jsonify({"error": "Invalid collection name"}), 400
+        
+        # Get collection info
+        try:
+            info = simplerag_instance.vector_db_service.client.get_collection(collection_name)
+        except Exception as e:
+            logger.error(f"Failed to get collection info for {collection_name}: {str(e)}")
+            return jsonify({"error": f"Collection not found: {str(e)}"}), 404
+        
+        # Get sample points
+        sample_points = []
+        try:
+            scroll_result = simplerag_instance.vector_db_service.client.scroll(
+                collection_name=collection_name,
+                limit=5,
+                with_payload=True,
+                with_vectors=False
+            )
+            
+            if scroll_result and len(scroll_result) > 0:
+                points = scroll_result[0] if isinstance(scroll_result, tuple) else scroll_result
+                sample_points = [
+                    {
+                        "id": str(point.id),
+                        "payload": dict(point.payload) if point.payload else {}
+                    } for point in points
+                ]
+                
+        except Exception as e:
+            logger.warning(f"Could not get sample points for {collection_name}: {str(e)}")
+            sample_points = []
+        
+        # Extract collection metrics safely
+        vectors_count = getattr(info, 'vectors_count', 0) or 0
+        indexed_vectors_count = getattr(info, 'indexed_vectors_count', 0) or 0
+        points_count = getattr(info, 'points_count', 0) or 0
+        
+        # Extract config safely
+        config_info = {"distance": "unknown", "size": 0}
+        try:
+            if hasattr(info, 'config') and info.config:
+                if hasattr(info.config, 'params') and info.config.params:
+                    if hasattr(info.config.params, 'vectors'):
+                        vectors_config = info.config.params.vectors
+                        if hasattr(vectors_config, 'distance'):
+                            distance = vectors_config.distance
+                            config_info["distance"] = distance.value if hasattr(distance, 'value') else str(distance)
+                        if hasattr(vectors_config, 'size'):
+                            config_info["size"] = vectors_config.size
+        except Exception as config_error:
+            logger.warning(f"Error extracting config for {collection_name}: {config_error}")
+        
+        return jsonify({
+            "name": collection_name,
+            "vectors_count": vectors_count,
+            "indexed_vectors_count": indexed_vectors_count,
+            "points_count": points_count,
+            "config": config_info,
+            "sample_points": sample_points
+        })
+        
+    except Exception as e:
+        logger.error(f"Error inspecting collection {collection_name}: {str(e)}")
+        return jsonify({"error": f"Inspection failed: {str(e)}"}), 500
+
+@app.route('/api/admin/cache/clear', methods=['POST'])
+def clear_cache():
+    """Clear embedding cache."""
+    try:
+        if simplerag_instance and hasattr(simplerag_instance, 'embedding_service'):
+            if hasattr(simplerag_instance.embedding_service, 'cache'):
+                cache_dir = simplerag_instance.embedding_service.cache.cache_dir
+                import shutil
+                if cache_dir.exists():
+                    shutil.rmtree(cache_dir)
+                    cache_dir.mkdir(parents=True, exist_ok=True)
+                    return jsonify({"success": True, "message": "Cache cleared successfully"})
+                else:
+                    return jsonify({"success": True, "message": "Cache directory not found"})
+            else:
+                return jsonify({"success": False, "message": "Cache not enabled"})
+        else:
+            return jsonify({"success": False, "message": "SimpleRAG not initialized"})
+            
+    except Exception as e:
+        logger.error(f"Error clearing cache: {str(e)}")
+        return jsonify({"error": f"Cache clear failed: {str(e)}"}), 500
+
+@app.route('/api/admin/collections/search/<collection_name>')
+def search_collection(collection_name):
+    """Search in a specific collection for debugging."""
+    try:
+        if not simplerag_instance or not simplerag_instance.vector_db_service:
+            return jsonify({"error": "SimpleRAG not initialized"}), 500
+        
+        # Validate collection name
+        if not collection_name or not collection_name.strip():
+            return jsonify({"error": "Invalid collection name"}), 400
+        
+        query = request.args.get('query', 'test')
+        limit = min(int(request.args.get('limit', 5)), 20)  # Cap at 20
+        
+        # Generate query embedding
+        try:
+            query_embedding = simplerag_instance.embedding_service.get_embedding(query)
+        except Exception as e:
+            logger.error(f"Failed to generate embedding for query: {str(e)}")
+            return jsonify({"error": f"Failed to generate embedding: {str(e)}"}), 500
+        
+        # Search collection
+        try:
+            results = simplerag_instance.vector_db_service.search_similar(
+                query_embedding,
+                top_k=limit,
+                collection_name=collection_name
+            )
+        except Exception as e:
+            logger.error(f"Failed to search collection {collection_name}: {str(e)}")
+            return jsonify({"error": f"Search failed: {str(e)}"}), 500
+        
+        return jsonify({
+            "collection": collection_name,
+            "query": query,
+            "results_count": len(results),
+            "results": [
+                {
+                    "score": result["score"],
+                    "text": result["text"][:200] + "..." if len(result["text"]) > 200 else result["text"],
+                    "metadata": result["metadata"]
+                } for result in results
+            ]
+        })
+        
+    except Exception as e:
+        logger.error(f"Error searching collection {collection_name}: {str(e)}")
+        return jsonify({"error": f"Collection search failed: {str(e)}"}), 500

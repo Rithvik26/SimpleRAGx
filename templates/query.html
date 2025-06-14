@@ -4,7 +4,20 @@
 
 {% block content %}
 <h2>Ask Questions</h2>
-<p>Ask questions about your indexed documents.</p>
+<p>Ask questions about your indexed documents using your preferred RAG mode.</p>
+
+<!-- NEW: Add current mode display -->
+<div class="alert alert-info">
+    <strong>Current RAG Mode:</strong> 
+    <span class="badge bg-{{ 'success' if config.rag_mode == 'graph' else 'primary' }}">
+        {{ config.rag_mode|title }} RAG
+    </span>
+    {% if config.rag_mode == 'normal' %}
+        - Using traditional semantic search
+    {% else %}
+        - Using knowledge graph reasoning
+    {% endif %}
+</div>
 
 <div class="card mt-4">
     <div class="card-body">
@@ -12,8 +25,32 @@
             <div class="mb-3">
                 <label for="question" class="form-label">Your Question</label>
                 <input type="text" class="form-control" id="question" name="question" 
-                       value="{{ question|default('') }}" required placeholder="What would you like to know about your documents?">
+                       value="{{ question|default('') }}" required 
+                       placeholder="What would you like to know about your documents?">
             </div>
+            
+            <!-- NEW: Add RAG mode selection for query -->
+            <div class="mb-3">
+                <label class="form-label">RAG Mode for this Query</label>
+                <div class="form-check">
+                    <input class="form-check-input" type="radio" name="rag_mode" id="query_normal" value="normal" 
+                           {% if config.rag_mode == 'normal' %}checked{% endif %}>
+                    <label class="form-check-label" for="query_normal">
+                        <strong>Normal RAG</strong> - Fast semantic search
+                    </label>
+                </div>
+                <div class="form-check">
+                    <input class="form-check-input" type="radio" name="rag_mode" id="query_graph" value="graph" 
+                           {% if config.rag_mode == 'graph' %}checked{% endif %}>
+                    <label class="form-check-label" for="query_graph">
+                        <strong>Graph RAG</strong> - Knowledge graph reasoning
+                    </label>
+                    <div class="form-text ms-4">
+                        <small class="text-muted">Better for complex queries about relationships and connections</small>
+                    </div>
+                </div>
+            </div>
+            
             <input type="hidden" name="async" id="async-input" value="false">
             <button type="submit" class="btn btn-primary">Ask</button>
         </form>
@@ -52,7 +89,7 @@
         <h5>Answer</h5>
     </div>
     <div class="card-body">
-        <div id="answer-text" class="answer-text markdown-content">
+        <div id="answer-text" class="answer-text">
             <!-- Will be populated with the answer -->
         </div>
     </div>
@@ -63,32 +100,51 @@
         <h5>Answer</h5>
     </div>
     <div class="card-body">
-        <div class="answer-text markdown-content">
-            {{ answer | safe }}
+        <div class="answer-text">
+            {{ answer | nl2br }}
         </div>
     </div>
 </div>
 {% endif %}
+
+<!-- NEW: Add usage tips -->
+<div class="mt-4">
+    <div class="row">
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header bg-primary text-white">
+                    <h6 class="mb-0">💡 Normal RAG Tips</h6>
+                </div>
+                <div class="card-body">
+                    <ul class="mb-0">
+                        <li>Great for direct factual questions</li>
+                        <li>Fast response times</li>
+                        <li>Works well with specific document searches</li>
+                        <li>Example: "What is the main conclusion?"</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header bg-success text-white">
+                    <h6 class="mb-0">🕸️ Graph RAG Tips</h6>
+                </div>
+                <div class="card-body">
+                    <ul class="mb-0">
+                        <li>Best for relationship questions</li>
+                        <li>Understands connections between concepts</li>
+                        <li>Slower but more comprehensive</li>
+                        <li>Example: "How are X and Y related?"</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-<script>
-    // Convert markdown to HTML
-    document.addEventListener('DOMContentLoaded', function() {
-        const markdownElements = document.querySelectorAll('.markdown-content');
-        markdownElements.forEach(element => {
-            const content = element.innerHTML.trim();
-            if (content) {
-                // Replace <br> tags with newlines for proper markdown parsing
-                const preprocessed = content.replace(/<br>/g, '\n');
-                // Convert cleaned markdown to HTML
-                element.innerHTML = marked.parse(preprocessed);
-            }
-        });
-    });
-</script>
-
 {% if in_progress %}
 <script>
     // Poll for query progress
@@ -140,7 +196,6 @@
             })
             .catch(error => {
                 console.error('Error fetching query result:', error);
-                // Continue polling if result not ready yet
                 if (!queryCompleted) {
                     setTimeout(fetchQueryResult, 1000);
                 }
@@ -160,9 +215,8 @@
             const answerText = document.getElementById('answer-text');
             answerContainer.style.display = 'block';
             
-            // Convert answer to markdown HTML
-            const preprocessed = result.replace(/<br>/g, '\n');
-            answerText.innerHTML = marked.parse(preprocessed);
+            // Convert newlines to <br> tags
+            answerText.innerHTML = result.replace(/\n/g, '<br>');
         }
     }
     
@@ -207,15 +261,19 @@
 {% endif %}
 
 <script>
-    // Automatically use async mode for long questions
+    // NEW: Automatically use async mode for long questions or Graph RAG
     document.addEventListener('DOMContentLoaded', function() {
         const questionInput = document.getElementById('question');
         const asyncInput = document.getElementById('async-input');
         const form = questionInput.form;
         
         form.addEventListener('submit', function(event) {
-            // If question is longer than 100 characters, use async mode
-            if (questionInput.value.length > 100) {
+            // Check if Graph RAG is selected
+            const graphRadio = document.getElementById('query_graph');
+            const isGraphMode = graphRadio && graphRadio.checked;
+            
+            // Use async mode for long questions or Graph RAG
+            if (questionInput.value.length > 100 || isGraphMode) {
                 asyncInput.value = 'true';
             }
         });

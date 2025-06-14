@@ -1,0 +1,348 @@
+{% extends "base.html" %}
+
+{% block title %}SimpleRAG - Admin Panel{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h2>System Administration</h2>
+    <div>
+        <a href="/admin/qdrant" class="btn btn-primary">
+            🗄️ Collection Manager
+        </a>
+    </div>
+</div>
+
+<div class="row">
+    <!-- System Status -->
+    <div class="col-md-6">
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5>System Status</h5>
+            </div>
+            <div class="card-body" id="system-status">
+                <div class="text-center">
+                    <div class="spinner-border" role="status"></div>
+                    <p class="mt-2">Loading status...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Quick Actions -->
+    <div class="col-md-6">
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5>Quick Actions</h5>
+            </div>
+            <div class="card-body">
+                <div class="d-grid gap-2">
+                    <button class="btn btn-outline-primary" onclick="refreshStatus()">
+                        <span id="refresh-spinner" class="spinner-border spinner-border-sm d-none me-1"></span>
+                        Refresh Status
+                    </button>
+                    <button class="btn btn-outline-warning" onclick="clearCache()">
+                        Clear Cache
+                    </button>
+                    <a href="/api/admin/qdrant/collections" class="btn btn-outline-info" target="_blank">
+                        View Collections API
+                    </a>
+                    <button class="btn btn-outline-success" onclick="testCollections()">
+                        Test Collections
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Collections Overview -->
+<div class="card mb-4">
+    <div class="card-header">
+        <h5>Collections Overview</h5>
+    </div>
+    <div class="card-body" id="collections-overview">
+        <div class="text-center">
+            <div class="spinner-border" role="status"></div>
+            <p class="mt-2">Loading collections...</p>
+        </div>
+    </div>
+</div>
+
+<!-- Debug Console -->
+<div class="card">
+    <div class="card-header">
+        <h5>Debug Console</h5>
+    </div>
+    <div class="card-body">
+        <div class="mb-3">
+            <label for="debug-query" class="form-label">Test Query</label>
+            <div class="input-group">
+                <input type="text" class="form-control" id="debug-query" placeholder="Enter test query..." value="TechCorp partnerships">
+                <select class="form-select" id="debug-collection" style="max-width: 200px;">
+                    <option value="">Select Collection</option>
+                </select>
+                <button class="btn btn-outline-primary" onclick="runDebugQuery()">Search</button>
+            </div>
+        </div>
+        <div id="debug-results" class="bg-light p-3 rounded" style="min-height: 100px; max-height: 400px; overflow-y: auto;">
+            <small class="text-muted">Debug results will appear here...</small>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    loadSystemStatus();
+    loadCollectionsOverview();
+    loadDebugCollections();
+});
+
+async function loadSystemStatus() {
+    try {
+        const response = await fetch('/api/system/status');
+        const data = await response.json();
+        
+        const statusDiv = document.getElementById('system-status');
+        const configuredKeys = Object.values(data.api_keys_configured).filter(Boolean).length;
+        const totalKeys = Object.keys(data.api_keys_configured).length;
+        
+        statusDiv.innerHTML = `
+            <div class="row text-center">
+                <div class="col">
+                    <h6>SimpleRAG</h6>
+                    <span class="badge bg-${data.simplerag_initialized ? 'success' : 'danger'}">
+                        ${data.simplerag_initialized ? 'Initialized' : 'Not Ready'}
+                    </span>
+                </div>
+                <div class="col">
+                    <h6>RAG Mode</h6>
+                    <span class="badge bg-${data.current_rag_mode === 'graph' ? 'success' : 'primary'}">
+                        ${data.current_rag_mode}
+                    </span>
+                </div>
+                <div class="col">
+                    <h6>API Keys</h6>
+                    <span class="badge bg-${configuredKeys === totalKeys ? 'success' : 'warning'}">
+                        ${configuredKeys}/${totalKeys}
+                    </span>
+                </div>
+            </div>
+            <hr>
+            <div class="small">
+                <strong>Collections:</strong><br>
+                Normal: <code>${data.collections.normal}</code><br>
+                Graph: <code>${data.collections.graph}</code>
+            </div>
+        `;
+    } catch (error) {
+        document.getElementById('system-status').innerHTML = `
+            <div class="alert alert-danger">Error loading status: ${error.message}</div>
+        `;
+    }
+}
+
+async function loadCollectionsOverview() {
+    try {
+        const response = await fetch('/api/admin/qdrant/collections');
+        const data = await response.json();
+        
+        const overviewDiv = document.getElementById('collections-overview');
+        
+        if (data.collections && data.collections.length > 0) {
+            let html = '<div class="row">';
+            
+            data.collections.forEach(collection => {
+                const isNormal = collection.name === data.normal_collection;
+                const isGraph = collection.name === data.graph_collection;
+                const badge = isNormal ? 'primary' : (isGraph ? 'success' : 'secondary');
+                const type = isNormal ? 'Normal' : (isGraph ? 'Graph' : 'Other');
+                
+                html += `
+                    <div class="col-md-4 mb-3">
+                        <div class="card border-${badge}">
+                            <div class="card-body text-center">
+                                <h6>${collection.name}</h6>
+                                <span class="badge bg-${badge}">${type}</span>
+                                <p class="mt-2 mb-1 small">
+                                    <strong>${collection.points_count.toLocaleString()}</strong> points
+                                </p>
+                                <button class="btn btn-outline-${badge} btn-sm" onclick="inspectCollection('${collection.name}')">
+                                    Inspect
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            });
+            
+            html += '</div>';
+            overviewDiv.innerHTML = html;
+        } else {
+            overviewDiv.innerHTML = `
+                <div class="alert alert-warning">
+                    No collections found. Create collections in the Collection Manager.
+                </div>
+            `;
+        }
+    } catch (error) {
+        document.getElementById('collections-overview').innerHTML = `
+            <div class="alert alert-danger">Error loading collections: ${error.message}</div>
+        `;
+    }
+}
+
+async function loadDebugCollections() {
+    try {
+        const response = await fetch('/api/admin/qdrant/collections');
+        const data = await response.json();
+        
+        const select = document.getElementById('debug-collection');
+        select.innerHTML = '<option value="">Select Collection</option>';
+        
+        if (data.collections) {
+            data.collections.forEach(collection => {
+                const option = document.createElement('option');
+                option.value = collection.name;
+                option.textContent = `${collection.name} (${collection.points_count} points)`;
+                select.appendChild(option);
+            });
+        }
+    } catch (error) {
+        console.error('Error loading debug collections:', error);
+    }
+}
+
+async function refreshStatus() {
+    const spinner = document.getElementById('refresh-spinner');
+    spinner.classList.remove('d-none');
+    
+    await loadSystemStatus();
+    await loadCollectionsOverview();
+    
+    spinner.classList.add('d-none');
+    showAlert('success', 'Status refreshed successfully!');
+}
+
+async function clearCache() {
+    try {
+        const response = await fetch('/api/admin/cache/clear', { method: 'POST' });
+        const data = await response.json();
+        
+        if (data.success) {
+            showAlert('success', 'Cache cleared successfully!');
+        } else {
+            showAlert('warning', `Cache clear result: ${data.message}`);
+        }
+    } catch (error) {
+        showAlert('danger', `Error clearing cache: ${error.message}`);
+    }
+}
+
+async function testCollections() {
+    try {
+        // Test connection first
+        const statusResponse = await fetch('/api/admin/qdrant/status');
+        const statusData = await statusResponse.json();
+        
+        if (!statusData.connected) {
+            showAlert('danger', `Connection test failed: ${statusData.error}`);
+            return;
+        }
+        
+        // Test collections
+        const collectionsResponse = await fetch('/api/admin/qdrant/collections');
+        const collectionsData = await collectionsResponse.json();
+        
+        if (collectionsData.collections) {
+            const normalExists = collectionsData.collections.some(c => c.name === collectionsData.normal_collection);
+            const graphExists = collectionsData.collections.some(c => c.name === collectionsData.graph_collection);
+            
+            let message = `Collections test: Normal (${normalExists ? '✓' : '✗'}), Graph (${graphExists ? '✓' : '✗'})`;
+            showAlert(normalExists && graphExists ? 'success' : 'warning', message);
+        } else {
+            showAlert('warning', 'No collections found');
+        }
+    } catch (error) {
+        showAlert('danger', `Test failed: ${error.message}`);
+    }
+}
+
+async function inspectCollection(name) {
+    try {
+        const response = await fetch(`/api/admin/qdrant/collections/${name}/inspect`);
+        const data = await response.json();
+        
+        const debugDiv = document.getElementById('debug-results');
+        debugDiv.innerHTML = `
+            <h6>Collection: ${name}</h6>
+            <pre style="white-space: pre-wrap; font-size: 0.8em;">${JSON.stringify(data, null, 2)}</pre>
+        `;
+    } catch (error) {
+        showAlert('danger', `Error inspecting collection: ${error.message}`);
+    }
+}
+
+async function runDebugQuery() {
+    const query = document.getElementById('debug-query').value.trim();
+    const collection = document.getElementById('debug-collection').value;
+    
+    if (!query) {
+        showAlert('warning', 'Please enter a query');
+        return;
+    }
+    
+    if (!collection) {
+        showAlert('warning', 'Please select a collection');
+        return;
+    }
+    
+    try {
+        const response = await fetch(`/api/admin/collections/search/${collection}?query=${encodeURIComponent(query)}&limit=3`);
+        const data = await response.json();
+        
+        const debugDiv = document.getElementById('debug-results');
+        if (data.results && data.results.length > 0) {
+            let html = `<h6>Search Results (${data.results_count} found)</h6>`;
+            data.results.forEach((result, index) => {
+                html += `
+                    <div class="border rounded p-2 mb-2 ${index === 0 ? 'bg-primary bg-opacity-10' : ''}">
+                        <div class="d-flex justify-content-between">
+                            <small><strong>Score:</strong> ${result.score.toFixed(4)}</small>
+                            <small><strong>Source:</strong> ${result.metadata.filename || 'Unknown'}</small>
+                        </div>
+                        <div class="mt-1" style="font-size: 0.9em;">${result.text}</div>
+                    </div>
+                `;
+            });
+            debugDiv.innerHTML = html;
+        } else {
+            debugDiv.innerHTML = `<div class="alert alert-warning">No results found for "${query}" in ${collection}</div>`;
+        }
+    } catch (error) {
+        document.getElementById('debug-results').innerHTML = `
+            <div class="alert alert-danger">Error running query: ${error.message}</div>
+        `;
+    }
+}
+
+function showAlert(type, message) {
+    const alertDiv = document.createElement('div');
+    alertDiv.className = `alert alert-${type} alert-dismissible fade show position-fixed`;
+    alertDiv.style.cssText = 'top: 20px; right: 20px; z-index: 1050; min-width: 300px;';
+    alertDiv.innerHTML = `
+        ${message}
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    `;
+    
+    document.body.appendChild(alertDiv);
+    
+    setTimeout(() => {
+        if (alertDiv.parentNode) {
+            alertDiv.remove();
+        }
+    }, 5000);
+}
+</script>
+{% endblock %}

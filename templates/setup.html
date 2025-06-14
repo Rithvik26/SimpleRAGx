@@ -3,8 +3,8 @@
 {% block title %}SimpleRAG - Setup{% endblock %}
 
 {% block content %}
-<h2>Configure SimpleRAG</h2>
-<p>Enter your API keys and settings to configure the system.</p>
+<h2>Configure Enhanced SimpleRAG</h2>
+<p>Enter your API keys and settings to configure the system with Normal and Graph RAG support.</p>
 
 <form method="post" class="mt-4">
     <div class="card mb-4">
@@ -16,7 +16,8 @@
                 <label for="gemini_api_key" class="form-label">Gemini API Key <span class="text-danger">*</span></label>
                 <input type="password" class="form-control" id="gemini_api_key" name="gemini_api_key" 
                        value="{{ config.gemini_api_key }}" required>
-                <div class="form-text">Required for embeddings. Get a key from <a href="https://makersuite.google.com/" target="_blank">Google AI Studio</a>.</div>
+                <!-- UPDATED: Mention Graph RAG -->
+                <div class="form-text">Required for embeddings and Graph RAG entity extraction. Get a key from <a href="https://makersuite.google.com/" target="_blank">Google AI Studio</a>.</div>
             </div>
             
             <div class="mb-3">
@@ -38,6 +39,34 @@
                 <input type="text" class="form-control" id="qdrant_url" name="qdrant_url" 
                     value="{{ config.qdrant_url }}">
                 <div class="form-text">URL of your Qdrant instance (e.g., https://your-instance.qdrant.io)</div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- NEW: Add RAG Mode Settings Section -->
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5>RAG Mode Settings</h5>
+        </div>
+        <div class="card-body">
+            <div class="mb-3">
+                <label class="form-label">Default RAG Mode</label>
+                <div class="form-check">
+                    <input class="form-check-input" type="radio" name="rag_mode" id="normal_rag" value="normal" 
+                           {% if config.rag_mode == 'normal' %}checked{% endif %}>
+                    <label class="form-check-label" for="normal_rag">
+                        <strong>Normal RAG</strong> - Traditional semantic search with document chunks
+                    </label>
+                    <div class="form-text ms-4">Fast, efficient, good for straightforward Q&A</div>
+                </div>
+                <div class="form-check">
+                    <input class="form-check-input" type="radio" name="rag_mode" id="graph_rag" value="graph" 
+                           {% if config.rag_mode == 'graph' %}checked{% endif %}>
+                    <label class="form-check-label" for="graph_rag">
+                        <strong>Graph RAG</strong> - Knowledge graph with entities and relationships
+                    </label>
+                    <div class="form-text ms-4">Advanced reasoning, better for complex queries and relationships</div>
+                </div>
             </div>
         </div>
     </div>
@@ -68,25 +97,54 @@
             <h5>Advanced Settings</h5>
         </div>
         <div class="card-body">
-            <div class="mb-3">
-                <label for="chunk_size" class="form-label">Chunk Size</label>
-                <input type="number" class="form-control" id="chunk_size" name="chunk_size" 
-                       value="{{ config.chunk_size }}" min="100" max="5000">
-                <div class="form-text">Size of text chunks in characters (500-5000 recommended).</div>
-            </div>
-            
-            <div class="mb-3">
-                <label for="chunk_overlap" class="form-label">Chunk Overlap</label>
-                <input type="number" class="form-control" id="chunk_overlap" name="chunk_overlap" 
-                       value="{{ config.chunk_overlap }}" min="0" max="1000">
-                <div class="form-text">Overlap between adjacent chunks (50-500 recommended).</div>
-            </div>
-            
-            <div class="mb-3">
-                <label for="top_k" class="form-label">Results Count (Top K)</label>
-                <input type="number" class="form-control" id="top_k" name="top_k" 
-                       value="{{ config.top_k }}" min="1" max="20">
-                <div class="form-text">Number of results to retrieve for each query (1-20).</div>
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="mb-3">
+                        <label for="chunk_size" class="form-label">Chunk Size</label>
+                        <input type="number" class="form-control" id="chunk_size" name="chunk_size" 
+                               value="{{ config.chunk_size }}" min="100" max="5000">
+                        <div class="form-text">Size of text chunks in characters (500-5000 recommended).</div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="chunk_overlap" class="form-label">Chunk Overlap</label>
+                        <input type="number" class="form-control" id="chunk_overlap" name="chunk_overlap" 
+                               value="{{ config.chunk_overlap }}" min="0" max="1000">
+                        <div class="form-text">Overlap between adjacent chunks (50-500 recommended).</div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="top_k" class="form-label">Results Count (Top K)</label>
+                        <input type="number" class="form-control" id="top_k" name="top_k" 
+                               value="{{ config.top_k }}" min="1" max="20">
+                        <div class="form-text">Number of results to retrieve for each query (1-20).</div>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <!-- NEW: Graph RAG Settings -->
+                    <h6>Graph RAG Settings</h6>
+                    
+                    <div class="mb-3">
+                        <label for="max_entities_per_chunk" class="form-label">Max Entities per Chunk</label>
+                        <input type="number" class="form-control" id="max_entities_per_chunk" name="max_entities_per_chunk" 
+                               value="{{ config.max_entities_per_chunk }}" min="5" max="50">
+                        <div class="form-text">Maximum entities to extract from each text chunk (5-50).</div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="graph_reasoning_depth" class="form-label">Graph Reasoning Depth</label>
+                        <input type="number" class="form-control" id="graph_reasoning_depth" name="graph_reasoning_depth" 
+                               value="{{ config.graph_reasoning_depth }}" min="1" max="5">
+                        <div class="form-text">How many relationship hops to consider (1-5).</div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="entity_similarity_threshold" class="form-label">Entity Similarity Threshold</label>
+                        <input type="number" class="form-control" id="entity_similarity_threshold" name="entity_similarity_threshold" 
+                               value="{{ config.entity_similarity_threshold }}" min="0.5" max="1.0" step="0.1">
+                        <div class="form-text">Threshold for merging similar entities (0.5-1.0).</div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>

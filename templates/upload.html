@@ -4,7 +4,17 @@
 
 {% block content %}
 <h2>Upload Documents</h2>
-<p>Upload documents to index them into the vector database.</p>
+<p>Upload documents to index them using your preferred RAG mode.</p>
+
+<!-- NEW: Add current mode display -->
+<div class="alert alert-info">
+    <strong>Current Default RAG Mode:</strong> 
+    <span class="badge bg-{{ 'success' if config.rag_mode == 'graph' else 'primary' }}">
+        {{ config.rag_mode|title }} RAG
+    </span>
+    <br>
+    <small>You can override this setting for individual uploads below.</small>
+</div>
 
 <div class="card mt-4">
     <div class="card-body">
@@ -14,21 +24,60 @@
                 <input type="file" class="form-control" id="document" name="document">
                 <div class="form-text">Supported formats: PDF, TXT, DOCX, HTML</div>
             </div>
+            
+            <!-- NEW: Add RAG mode selection -->
+            <div class="mb-3">
+                <label class="form-label">RAG Mode for this Document</label>
+                <div class="form-check">
+                    <input class="form-check-input" type="radio" name="rag_mode" id="upload_normal" value="normal" 
+                           {% if config.rag_mode == 'normal' %}checked{% endif %}>
+                    <label class="form-check-label" for="upload_normal">
+                        <strong>Normal RAG</strong> - Fast semantic search
+                    </label>
+                </div>
+                <div class="form-check">
+                    <input class="form-check-input" type="radio" name="rag_mode" id="upload_graph" value="graph" 
+                           {% if config.rag_mode == 'graph' %}checked{% endif %}>
+                    <label class="form-check-label" for="upload_graph">
+                        <strong>Graph RAG</strong> - Extract entities and relationships
+                    </label>
+                    <div class="form-text ms-4">
+                        <small class="text-muted">⚠️ Graph RAG takes longer but provides richer context</small>
+                    </div>
+                </div>
+            </div>
+            
             <button type="submit" class="btn btn-primary">Upload & Index</button>
         </form>
     </div>
 </div>
 
 <div class="mt-4">
-    <h4>Indexing Process</h4>
-    <ol>
-        <li>Your document is uploaded and text is extracted</li>
-        <li>Text is split into chunks with some overlap</li>
-        <li>Each chunk is converted to a vector embedding</li>
-        <li>Embeddings are stored in the vector database</li>
-    </ol>
-    <p class="alert alert-info">
-        <strong>Note:</strong> Document processing can take some time depending on the file size and complexity.
+    <!-- NEW: Add processing explanation -->
+    <div class="row">
+        <div class="col-md-6">
+            <h4>Normal RAG Process</h4>
+            <ol>
+                <li>Text extraction from document</li>
+                <li>Split into overlapping chunks</li>
+                <li>Generate embeddings for chunks</li>
+                <li>Store in vector database</li>
+            </ol>
+        </div>
+        <div class="col-md-6">
+            <h4>Graph RAG Process</h4>
+            <ol>
+                <li>Text extraction from document</li>
+                <li>Extract entities and relationships</li>
+                <li>Build knowledge graph</li>
+                <li>Generate embeddings for graph elements</li>
+                <li>Store both chunks and graph in database</li>
+            </ol>
+        </div>
+    </div>
+    
+    <p class="alert alert-warning mt-3">
+        <strong>Note:</strong> Graph RAG processing takes significantly longer than Normal RAG due to entity extraction and relationship mapping, but provides much richer contextual understanding.
     </p>
 </div>
 {% endblock %}
