@@ -24,9 +24,17 @@ class EnhancedSimpleRAG:
     
     def __init__(self, config_manager: ConfigManager = None):
         """Initialize SimpleRAG with comprehensive error handling and service validation."""
+        import os
+        os.environ.update(os.environ)
         # Configuration
         self.config_manager = config_manager or get_config_manager()
+        self.config_manager._apply_env_overrides(self.config_manager.config)
+
         self.config = self.config_manager.get_all()
+         # Log configuration status for debugging
+        logger.info(f"Gemini API Key present: {'Yes' if self.config.get('gemini_api_key') else 'No'}")
+        logger.info(f"Qdrant API Key present: {'Yes' if self.config.get('qdrant_api_key') else 'No'}")
+        logger.info(f"Qdrant URL: {self.config.get('qdrant_url', 'Not set')}")
         
         # Current RAG mode
         self.rag_mode = self.config.get("rag_mode", "normal")

@@ -48,6 +48,12 @@ def initialize_services():
     global simplerag_instance
     
     try:
+        # Log environment variables (without exposing keys)
+        logger.info("Checking environment variables...")
+        logger.info(f"GEMINI_API_KEY: {'SET' if os.environ.get('GEMINI_API_KEY') else 'NOT SET'}")
+        logger.info(f"QDRANT_API_KEY: {'SET' if os.environ.get('QDRANT_API_KEY') else 'NOT SET'}")
+        logger.info(f"QDRANT_URL: {os.environ.get('QDRANT_URL', 'NOT SET')}")
+        
         logger.info("Initializing Enhanced SimpleRAG services...")
         simplerag_instance = EnhancedSimpleRAG()
         

@@ -95,7 +95,9 @@ class ConfigManager:
             env_value = os.environ.get(env_key)
             if env_value:
                 config[config_key] = env_value
-                logger.debug(f"Config override from env: {config_key}")
+                logger.info(f"Config override from env: {config_key} = {'***' if 'key' in config_key else env_value}")
+            else:
+                logger.warning(f"Environment variable {env_key} not found")
     
     def _save_config(self, config: Dict[str, Any]):
         """Save configuration to file."""
