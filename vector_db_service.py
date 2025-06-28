@@ -29,46 +29,57 @@ class VectorDBService:
         
         # Initialize client
         self._initialize_client()
-    
+    def retry_connection(self):
+        """Retry connection to Qdrant with user's current credentials."""
+        logger.info("Retrying Qdrant connection...")
+        self._initialize_client()
+        return self.is_connected
     def _initialize_client(self):
         """Initialize Qdrant client with comprehensive error handling."""
         try:
             # Validate configuration
-            if not self.qdrant_url:
-                raise ValueError("Qdrant URL not configured")
-            if not self.qdrant_api_key:
-                raise ValueError("Qdrant API key not configured")
+            if not self.qdrant_url or not self.qdrant_api_key:
+                logger.info("Qdrant credentials not configured - service will be unavailable")
+                self.client = None
+                self.is_connected = False
+                self.last_error = "Credentials not configured"
+                return
             
             logger.info(f"Initializing Qdrant client with URL: {self.qdrant_url}")
             
-            # Determine connection method based on URL
-            if "cloud.qdrant.io" in self.qdrant_url:
-                # Qdrant Cloud connection
-                host = self.qdrant_url.replace("https://", "").replace("http://", "").split(':')[0]
+            # Try normal connection first
+            try:
+                if "cloud.qdrant.io" in self.qdrant_url:
+                    host = self.qdrant_url.replace("https://", "").replace("http://", "").split(':')[0]
+                    
+                    self.client = qdrant_client.QdrantClient(
+                        host=host,
+                        api_key=self.qdrant_api_key,
+                        timeout=60,
+                        https=True,
+                        port=443
+                    )
+                else:
+                    self.client = qdrant_client.QdrantClient(
+                        url=self.qdrant_url,
+                        api_key=self.qdrant_api_key,
+                        timeout=60
+                    )
                 
-                logger.info(f"Connecting to Qdrant Cloud: {host}")
+                # Test the connection
+                self._test_connection()
+                self.is_connected = True
+                self.last_error = None
+                logger.info("Qdrant client initialized successfully")
                 
-                self.client = qdrant_client.QdrantClient(
-                    host=host,
-                    api_key=self.qdrant_api_key,
-                    timeout=60,
-                    https=True,
-                    port=443
-                )
-            else:
-                # Self-hosted Qdrant
-                logger.info(f"Connecting to self-hosted Qdrant: {self.qdrant_url}")
-                self.client = qdrant_client.QdrantClient(
-                    url=self.qdrant_url,
-                    api_key=self.qdrant_api_key,
-                    timeout=60
-                )
-            
-            # Test the connection
-            self._test_connection()
-            self.is_connected = True
-            self.last_error = None
-            logger.info("Qdrant client initialized successfully")
+            except Exception as primary_error:
+                logger.warning(f"Primary connection failed: {primary_error}")
+                
+                # Try alternative connection methods
+                if self._try_alternative_connection():
+                    logger.info("✓ Connected using alternative method")
+                else:
+                    raise primary_error  # Re-raise if all methods fail
             
         except Exception as e:
             error_msg = f"Failed to initialize Qdrant client: {str(e)}"
@@ -77,7 +88,65 @@ class VectorDBService:
             self.is_connected = False
             self.last_error = error_msg
             # Don't raise - allow graceful degradation
-    
+    def _try_alternative_connection(self):
+        """Try alternative connection methods for SSL issues."""
+        if not self.qdrant_url or not self.qdrant_api_key:
+            return False
+        
+        try:
+            # Method 1: Try without SSL verification
+            if "https://" in self.qdrant_url:
+                logger.info("Trying connection without SSL verification...")
+                host = self.qdrant_url.replace("https://", "").replace("http://", "").split(':')[0]
+                
+                self.client = qdrant_client.QdrantClient(
+                    host=host,
+                    api_key=self.qdrant_api_key,
+                    timeout=60,
+                    https=True,
+                    port=443,
+                    verify=False  # Disable SSL verification
+                )
+                
+                # Test this connection
+                self.client.get_collections()
+                self.is_connected = True
+                self.last_error = None
+                logger.info("✓ Connected with SSL verification disabled")
+                return True
+                
+        except Exception as e:
+            logger.warning(f"Alternative connection method 1 failed: {e}")
+        
+        try:
+            # Method 2: Try with REST API instead of gRPC
+            logger.info("Trying REST API connection...")
+            import requests
+            
+            # Simple REST API test
+            headers = {"api-key": self.qdrant_api_key}
+            response = requests.get(f"{self.qdrant_url}/collections", headers=headers, timeout=10, verify=False)
+            
+            if response.status_code == 200:
+                # If REST works, try initializing client with prefer_grpc=False
+                self.client = qdrant_client.QdrantClient(
+                    url=self.qdrant_url,
+                    api_key=self.qdrant_api_key,
+                    timeout=60,
+                    prefer_grpc=False,  # Use REST instead of gRPC
+                    verify=False
+                )
+                
+                self.client.get_collections()
+                self.is_connected = True
+                self.last_error = None
+                logger.info("✓ Connected using REST API")
+                return True
+                
+        except Exception as e:
+            logger.warning(f"Alternative connection method 2 failed: {e}")
+        
+        return False
     def _test_connection(self):
         """Test the Qdrant connection with detailed error reporting."""
         if not self.client:

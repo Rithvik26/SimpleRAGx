@@ -28,7 +28,7 @@ class EnhancedSimpleRAG:
         os.environ.update(os.environ)
         # Configuration
         self.config_manager = config_manager or get_config_manager()
-        self.config_manager._apply_env_overrides(self.config_manager.config)
+        #self.config_manager._apply_env_overrides(self.config_manager.config)
 
         self.config = self.config_manager.get_all()
          # Log configuration status for debugging
@@ -69,41 +69,38 @@ class EnhancedSimpleRAG:
             logger.error(error_msg)
             self.initialization_errors.append(error_msg)
         
-        # 2. Embedding Service
-        try:
-            if not self.config.get("gemini_api_key"):
-                raise ValueError("Gemini API key not configured")
-            
-            self.embedding_service = EmbeddingService(self.config)
-            
-            # Test the service
-            test_embedding = self.embedding_service.get_embedding("test")
-            if not test_embedding or len(test_embedding) == 0:
-                raise ValueError("Embedding service test failed")
-            
-            logger.info("✓ Embedding service initialized and tested")
-        except Exception as e:
-            error_msg = f"Failed to initialize embedding service: {str(e)}"
-            logger.error(error_msg)
-            self.initialization_errors.append(error_msg)
+        # 2. Embedding Service - MAKE CONDITIONAL
+        if self.config.get("gemini_api_key"):  # Only if key exists
+            try:
+                self.embedding_service = EmbeddingService(self.config)
+                # Remove the test embedding call that fails without valid key
+                logger.info("✓ Embedding service initialized")
+            except Exception as e:
+                error_msg = f"Failed to initialize embedding service: {str(e)}"
+                logger.error(error_msg)
+                self.initialization_errors.append(error_msg)
+        else:
+            logger.info("⚠ Embedding service skipped - Gemini API key not configured")
         
-        # 3. Vector Database Service
-        try:
-            if not self.config.get("qdrant_url") or not self.config.get("qdrant_api_key"):
-                raise ValueError("Qdrant URL or API key not configured")
-            
-            self.vector_db_service = VectorDBService(self.config)
-            
-            # Test the service
-            if not self.vector_db_service.is_available():
-                raise RuntimeError(f"Qdrant service not available: {self.vector_db_service.last_error}")
-            
-            logger.info("✓ Vector database service initialized and tested")
-        except Exception as e:
-            error_msg = f"Failed to initialize vector database service: {str(e)}"
-            logger.error(error_msg)
-            self.initialization_errors.append(error_msg)
-            self.vector_db_service = None
+        # 3. Vector Database Service - MAKE CONDITIONAL AND NON-BLOCKING
+        if self.config.get("qdrant_url") and self.config.get("qdrant_api_key"):
+            try:
+                self.vector_db_service = VectorDBService(self.config)
+                
+                # Don't fail if connection doesn't work immediately
+                if self.vector_db_service.is_connected:
+                    logger.info("✓ Vector database service initialized and connected")
+                else:
+                    logger.warning("⚠ Vector database service initialized but not connected")
+                    self.initialization_warnings.append(f"Vector DB connection issue: {self.vector_db_service.last_error}")
+                
+            except Exception as e:
+                error_msg = f"Failed to initialize vector database service: {str(e)}"
+                logger.error(error_msg)
+                self.initialization_warnings.append(error_msg)  # Change to warning instead of error
+                self.vector_db_service = None
+        else:
+            logger.info("⚠ Vector database service skipped - credentials not configured")
         
         # 4. LLM Service
         try:

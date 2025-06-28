@@ -12,12 +12,12 @@ logger = logging.getLogger(__name__)
 
 # Enhanced default configuration with Graph RAG options
 DEFAULT_CONFIG = {
-    "gemini_api_key": os.environ.get("GEMINI_API_KEY", ""),
-    "claude_api_key": os.environ.get("CLAUDE_API_KEY", ""),
-    "qdrant_url": os.environ.get("QDRANT_URL", "https://3cbcacc0-1fe5-42a1-8be0-81515a21771b.us-west-2-0.aws.cloud.qdrant.io"),
-    "qdrant_api_key": os.environ.get("QDRANT_API_KEY", ""),
-    "collection_name": os.environ.get("QDRANT_COLLECTION", "simple_rag_docs"),
-    "graph_collection_name": os.environ.get("QDRANT_GRAPH_COLLECTION", "simple_rag_graph"),
+    "gemini_api_key": "",  # Remove os.environ.get
+    "claude_api_key": "",  # Remove os.environ.get
+    "qdrant_url": "",      # Remove hardcoded URL
+    "qdrant_api_key": "",  # Remove os.environ.get
+    "collection_name": "simple_rag_docs",  # Keep default name
+    "graph_collection_name": "simple_rag_graph",
     "embedding_dimension": 768,
     "chunk_size": 1000,
     "chunk_overlap": 200,
@@ -36,7 +36,7 @@ DEFAULT_CONFIG = {
     "max_chunk_length_for_graph": 2000
 }
 
-CONFIG_PATH = os.environ.get("CONFIG_PATH", os.path.expanduser("~/.simplerag/config.json"))
+CONFIG_PATH = os.environ.get("CONFIG_PATH", "/tmp/simplerag_config.json")  # Use temp file instead
 
 class ConfigManager:
     """Manages configuration loading, saving, and validation."""
@@ -53,32 +53,24 @@ class ConfigManager:
         """Load configuration from file or create default."""
         self._ensure_config_dir_exists()
         
-        if not os.path.exists(self.config_path):
-            logger.info(f"Creating default configuration at {self.config_path}")
-            self._save_config(DEFAULT_CONFIG)
-            return DEFAULT_CONFIG.copy()
+        # Always start with clean defaults - don't load from existing file
+        config = DEFAULT_CONFIG.copy()
         
-        try:
-            with open(self.config_path, 'r') as f:
-                config = json.load(f)
-            
-            # Merge with defaults for any missing keys
-            updated_config = DEFAULT_CONFIG.copy()
-            updated_config.update(config)
-            
-            # Save updated config if new keys were added
-            if len(updated_config) != len(config):
-                self._save_config(updated_config)
-            
-            # Override with environment variables
-            self._apply_env_overrides(updated_config)
-            
-            return updated_config
-            
-        except (json.JSONDecodeError, IOError) as e:
-            logger.error(f"Error loading config from {self.config_path}: {e}")
-            logger.info("Using default configuration")
-            return DEFAULT_CONFIG.copy()
+        # Only apply environment variables if explicitly set for production
+        # Remove this line: self._apply_env_overrides(config)
+        
+        return config
+        
+        # Comment out or remove all the file loading logic:
+        # if not os.path.exists(self.config_path):
+        #     logger.info(f"Creating default configuration at {self.config_path}")
+        #     self._save_config(DEFAULT_CONFIG)
+        #     return DEFAULT_CONFIG.copy()
+        # 
+        # try:
+        #     with open(self.config_path, 'r') as f:
+        #         config = json.load(f)
+        #     ...etc
     
     def _apply_env_overrides(self, config: Dict[str, Any]):
         """Apply environment variable overrides."""
@@ -93,11 +85,10 @@ class ConfigManager:
         
         for config_key, env_key in env_overrides.items():
             env_value = os.environ.get(env_key)
-            if env_value:
+            if env_value:  # Only override if env var exists
                 config[config_key] = env_value
-                logger.info(f"Config override from env: {config_key} = {'***' if 'key' in config_key else env_value}")
-            else:
-                logger.warning(f"Environment variable {env_key} not found")
+                logger.info(f"Config override from env: {config_key}")
+            
     
     def _save_config(self, config: Dict[str, Any]):
         """Save configuration to file."""

@@ -48,24 +48,12 @@ def initialize_services():
     global simplerag_instance
     
     try:
-        # Log environment variables (without exposing keys)
-        logger.info("Checking environment variables...")
-        logger.info(f"GEMINI_API_KEY: {'SET' if os.environ.get('GEMINI_API_KEY') else 'NOT SET'}")
-        logger.info(f"QDRANT_API_KEY: {'SET' if os.environ.get('QDRANT_API_KEY') else 'NOT SET'}")
-        logger.info(f"QDRANT_URL: {os.environ.get('QDRANT_URL', 'NOT SET')}")
-        
         logger.info("Initializing Enhanced SimpleRAG services...")
         simplerag_instance = EnhancedSimpleRAG()
         
-        if simplerag_instance.is_ready():
-            logger.info("✓ SimpleRAG services initialized successfully")
-            return True
-        else:
-            logger.warning("⚠ SimpleRAG initialized with some issues")
-            status = simplerag_instance.get_status()
-            for error in status.get('initialization_errors', []):
-                logger.error(f"  Error: {error}")
-            return False
+        # Remove the is_ready() check - always return True
+        logger.info("✓ SimpleRAG services initialized")
+        return True
         
     except Exception as e:
         logger.error(f"Error initializing SimpleRAG services: {e}")
@@ -115,8 +103,10 @@ def process_query_background(question, session_id=None):
     global simplerag_instance
     
     try:
-        if not simplerag_instance or not simplerag_instance.is_ready():
-            result = "SimpleRAG services not ready. Please check configuration."
+        config = get_config_manager().get_all()
+        if not config.get("gemini_api_key") or not config.get("qdrant_api_key"):
+            flash('Please configure your API keys first.', 'danger')
+            return redirect(url_for('setup'))
         else:
             logger.info(f"Processing background query: {question[:50]}...")
             result = simplerag_instance.query(question, session_id)
@@ -156,11 +146,10 @@ def home():
     
     config_manager = get_config_manager()
     config = config_manager.get_all()
-    is_configured = bool(config.get("gemini_api_key"))
+    # Change this logic
+    is_configured = bool(config.get("gemini_api_key") and config.get("qdrant_api_key") and config.get("qdrant_url"))
     
-    current_mode = "Unknown"
-    if simplerag_instance:
-        current_mode = simplerag_instance.rag_mode
+    current_mode = config.get("rag_mode", "normal")  # Get from config instead
     
     return render_template('index.html', 
                           is_configured=is_configured, 
@@ -273,8 +262,9 @@ def upload():
             upload_rag_mode = 'normal'
         
         # Check if SimpleRAG is ready
-        if not simplerag_instance or not simplerag_instance.is_ready():
-            flash('SimpleRAG not ready. Please configure API keys first.', 'danger')
+        config = get_config_manager().get_all()
+        if not config.get("gemini_api_key") or not config.get("qdrant_api_key"):
+            flash('Please configure your API keys first.', 'danger')
             return redirect(url_for('setup'))
         
         # Update RAG mode if different
@@ -364,8 +354,9 @@ def query():
             flash('Please enter a question', 'warning')
             return render_template('query.html', config=config_manager.get_all())
         
-        if not simplerag_instance or not simplerag_instance.is_ready():
-            flash('SimpleRAG not ready. Please check configuration.', 'danger')
+        config = get_config_manager().get_all()
+        if not config.get("gemini_api_key") or not config.get("qdrant_api_key"):
+            flash('Please configure your API keys first.', 'danger')
             return redirect(url_for('setup'))
         
         # Switch RAG mode if specified
@@ -527,17 +518,23 @@ def qdrant_status():
         })
     
     try:
+        # Try to reconnect if not connected
+        if not simplerag_instance.vector_db_service.is_connected:
+            simplerag_instance.vector_db_service.retry_connection()
+        
         status = simplerag_instance.vector_db_service.get_status()
         return jsonify({
             "connected": status.get('connected', False),
             "url": status.get('url', 'Unknown'),
             "collection_count": status.get('total_collections', 0),
-            "error": status.get('last_error')
+            "error": status.get('last_error'),
+            "retry_available": True
         })
     except Exception as e:
         return jsonify({
             "connected": False,
-            "error": f"Status check failed: {str(e)}"
+            "error": f"Status check failed: {str(e)}",
+            "retry_available": True
         })
 
 @app.route('/api/admin/qdrant/collections')

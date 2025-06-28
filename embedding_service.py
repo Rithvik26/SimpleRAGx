@@ -27,9 +27,7 @@ class EmbeddingService:
         else:
             logger.info("Embedding cache disabled")
         
-        # Validate API key
-        if not self.api_key:
-            raise ValueError("Gemini API key is required for embedding service")
+        
     
     def _prepare_text_for_embedding(self, text: str) -> str:
         """Prepare text for embedding by cleaning and truncating."""
