@@ -241,6 +241,70 @@ def setup():
     
     return render_template('setup.html', config=config_manager.get_all())
 
+@app.route('/agentic')
+def agentic_interface():
+    """Agentic AI interface for autonomous query processing."""
+    config_manager = get_config_manager()
+    
+    # Check if agentic AI is available
+    agentic_available = False
+    available_tools = []
+    agentic_stats = {}
+    
+    if simplerag_instance and simplerag_instance.is_agentic_ready():
+        agentic_available = True
+        available_tools = simplerag_instance.agentic_service.get_available_tools()
+        agentic_stats = simplerag_instance.agentic_service.get_agentic_stats()
+    
+    return render_template('agentic.html', 
+                          config=config_manager.get_all(),
+                          agentic_available=agentic_available,
+                          available_tools=available_tools,
+                          agentic_stats=agentic_stats)
+
+@app.route('/agentic/query', methods=['POST'])
+def agentic_query():
+    """Handle agentic AI queries with autonomous tool selection."""
+    data = request.get_json()
+    question = data.get('question', '').strip()
+    
+    if not question:
+        return jsonify({"error": "No question provided"}), 400
+    
+    if not simplerag_instance or not simplerag_instance.is_agentic_ready():
+        return jsonify({
+            "error": "Agentic AI not available. Please check Claude API configuration."
+        }), 503
+    
+    try:
+        session_id = session.get('session_id')
+        result = simplerag_instance.query_agentic(question, session_id)
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        logger.error(f"Error in agentic query: {e}")
+        return jsonify({"error": f"Agentic query failed: {str(e)}"}), 500
+
+@app.route('/api/agentic/tools')
+def get_agentic_tools():
+    """Get information about available agentic tools."""
+    if not simplerag_instance or not simplerag_instance.is_agentic_ready():
+        return jsonify({"error": "Agentic AI not available"}), 503
+    
+    try:
+        tools = simplerag_instance.agentic_service.get_available_tools()
+        stats = simplerag_instance.agentic_service.get_agentic_stats()
+        
+        return jsonify({
+            "tools": tools,
+            "stats": stats
+        })
+        
+    except Exception as e:
+        return jsonify({"error": f"Failed to get tools: {str(e)}"}), 500
+    
+    
 @app.route('/upload', methods=['GET', 'POST'])
 def upload():
     """Handle document uploads with RAG mode selection."""
@@ -319,6 +383,7 @@ def upload():
             return redirect(request.url)
     
     return render_template('upload.html', config=config_manager.get_all())
+
 
 @app.route('/upload/progress')
 def upload_progress():
@@ -685,3 +750,6 @@ if __name__ == '__main__':
     
     logger.info(f"Starting Flask app on {host}:{port} (debug={debug_mode})")
     app.run(debug=debug_mode, host=host, port=port)
+
+
+# Add these routes to app.py before the error handlers section

@@ -1,0 +1,236 @@
+{% extends "base.html" %}
+
+{% block title %}SimpleRAG - Agentic RAG AI{% endblock %}
+
+{% block content %}
+<h2>🤖 Agentic RAG AI Assistant</h2>
+<p>Let the AI agent autonomously select the best tools and strategies to answer your questions.</p>
+
+{% if agentic_available %}
+<div class="alert alert-success">
+    <strong>🎯 Agentic RAG AI Ready!</strong> The agent can autonomously use multiple tools to provide comprehensive answers.
+</div>
+{% else %}
+<div class="alert alert-warning">
+    <strong>⚠️ Agentic RAG AI Not Available</strong><br>
+    Please ensure Claude API key is configured in <a href="{{ url_for('setup') }}">Settings</a>.
+</div>
+{% endif %}
+
+<!-- Available Tools Display -->
+{% if available_tools %}
+<div class="card mb-4">
+    <div class="card-header">
+        <h5>🛠️ Available Agent Tools</h5>
+    </div>
+    <div class="card-body">
+        <div class="row">
+            {% for tool in available_tools %}
+            <div class="col-md-6 mb-3">
+                <div class="card border-primary">
+                    <div class="card-body">
+                        <h6 class="card-title">{{ tool.name.replace('_', ' ').title() }}</h6>
+                        <p class="card-text small">{{ tool.description[:150] }}{% if tool.description|length > 150 %}...{% endif %}</p>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<!-- Query Interface -->
+<div class="card mt-4">
+    <div class="card-header">
+        <h5>🎯 Ask the Agentic RAG AI</h5>
+    </div>
+    <div class="card-body">
+        <div class="mb-3">
+            <label for="agentic-question" class="form-label">Your Question</label>
+            <textarea class="form-control" id="agentic-question" rows="3" 
+                     placeholder="Ask a complex question that might require multiple tools or analysis steps..."
+                     {% if not agentic_available %}disabled{% endif %}></textarea>
+            <div class="form-text">
+                The agent will automatically select the best tools and approach for your question.
+            </div>
+        </div>
+        
+        <button type="button" class="btn btn-primary" id="ask-agentic-btn" 
+                {% if not agentic_available %}disabled{% endif %}>
+            <span id="agentic-spinner" class="spinner-border spinner-border-sm d-none me-2"></span>
+            🤖 Ask Agentic RAG AI
+        </button>
+    </div>
+</div>
+
+<!-- Results Display -->
+<div id="agentic-results" class="mt-4" style="display: none;">
+    <div class="card">
+        <div class="card-header">
+            <h5>🎯 Agentic RAG AI Response</h5>
+        </div>
+        <div class="card-body">
+            <!-- Answer -->
+            <div class="mb-4">
+                <h6>💡 Answer:</h6>
+                <div id="agentic-answer" class="answer-text bg-light p-3 rounded"></div>
+            </div>
+            
+            <!-- Tools Used -->
+            <div class="mb-4">
+                <h6>🛠️ Tools Used:</h6>
+                <div id="tools-used-badges"></div>
+            </div>
+            
+            <!-- Reasoning Steps -->
+            <div class="mb-4">
+                <h6>🧠 Agent Reasoning Steps:</h6>
+                <div id="reasoning-steps" class="accordion"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Usage Tips -->
+<div class="mt-4">
+    <div class="card">
+        <div class="card-header bg-info text-white">
+            <h6 class="mb-0">💡 Agentic RAG AI Tips</h6>
+        </div>
+        <div class="card-body">
+            <ul class="mb-0">
+                <li><strong>Complex Questions:</strong> "How are TechCorp's partnerships related to their leadership structure?"</li>
+                <li><strong>Multi-Step Analysis:</strong> "What evidence supports the claim that TechCorp is a market leader?"</li>
+                <li><strong>Verification Queries:</strong> "Is the information about TechCorp's revenue growth accurate?"</li>
+                <li><strong>Relationship Exploration:</strong> "What connections exist between key people and organizations?"</li>
+            </ul>
+        </div>
+    </div>
+</div>
+
+<!-- System Status -->
+{% if agentic_stats %}
+<div class="mt-4">
+    <div class="card">
+        <div class="card-header">
+            <h6>📊 Agentic RAG AI Status</h6>
+        </div>
+        <div class="card-body">
+            <div class="row text-center">
+                <div class="col">
+                    <h6>Service Status</h6>
+                    <span class="badge bg-{{ 'success' if agentic_stats.service_available else 'danger' }}">
+                        {{ 'Available' if agentic_stats.service_available else 'Not Available' }}
+                    </span>
+                </div>
+                <div class="col">
+                    <h6>Available Tools</h6>
+                    <span class="badge bg-primary">{{ agentic_stats.tools_count }}</span>
+                </div>
+                <div class="col">
+                    <h6>LLM Status</h6>
+                    <span class="badge bg-{{ 'success' if agentic_stats.llm_configured else 'warning' }}">
+                        {{ 'Configured' if agentic_stats.llm_configured else 'Not Configured' }}
+                    </span>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const questionTextarea = document.getElementById('agentic-question');
+    const askButton = document.getElementById('ask-agentic-btn');
+    const spinner = document.getElementById('agentic-spinner');
+    const resultsDiv = document.getElementById('agentic-results');
+    
+    askButton.addEventListener('click', async function() {
+        const question = questionTextarea.value.trim();
+        
+        if (!question) {
+            alert('Please enter a question');
+            return;
+        }
+        
+        // Show loading state
+        askButton.disabled = true;
+        spinner.classList.remove('d-none');
+        resultsDiv.style.display = 'none';
+        
+        try {
+            const response = await fetch('/agentic/query', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ question: question })
+            });
+            
+            const result = await response.json();
+            
+            if (result.error) {
+                throw new Error(result.error);
+            }
+            
+            displayResults(result);
+            
+        } catch (error) {
+            console.error('Error:', error);
+            alert('Error: ' + error.message);
+        } finally {
+            // Hide loading state
+            askButton.disabled = false;
+            spinner.classList.add('d-none');
+        }
+    });
+    
+    function displayResults(result) {
+        // Display answer
+        document.getElementById('agentic-answer').innerHTML = result.answer.replace(/\n/g, '<br>');
+        
+        // Display tools used
+        const toolsBadges = document.getElementById('tools-used-badges');
+        toolsBadges.innerHTML = '';
+        result.tools_used.forEach(tool => {
+            const badge = document.createElement('span');
+            badge.className = 'badge bg-primary me-2';
+            badge.textContent = tool.replace('_', ' ');
+            toolsBadges.appendChild(badge);
+        });
+        
+        // Display reasoning steps
+        const reasoningDiv = document.getElementById('reasoning-steps');
+        reasoningDiv.innerHTML = '';
+        
+        result.reasoning_steps.forEach((step, index) => {
+            const stepDiv = document.createElement('div');
+            stepDiv.className = 'accordion-item';
+            stepDiv.innerHTML = `
+                <h2 class="accordion-header" id="step-heading-${index}">
+                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" 
+                            data-bs-target="#step-${index}" aria-expanded="false">
+                        Step ${index + 1}: ${step.tool.replace('_', ' ')}
+                    </button>
+                </h2>
+                <div id="step-${index}" class="accordion-collapse collapse" 
+                     data-bs-parent="#reasoning-steps">
+                    <div class="accordion-body">
+                        <p><strong>Tool:</strong> ${step.tool}</p>
+                        <p><strong>Input:</strong> ${step.input}</p>
+                        ${step.reasoning ? '<p><strong>Reasoning:</strong> ' + step.reasoning + '</p>' : ''}
+                    </div>
+                </div>
+            `;
+            reasoningDiv.appendChild(stepDiv);
+        });
+        
+        resultsDiv.style.display = 'block';
+    }
+});
+</script>
+{% endblock %}

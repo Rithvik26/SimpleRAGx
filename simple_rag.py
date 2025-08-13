@@ -16,6 +16,7 @@ from graph_rag_service import GraphRAGService
 from document_processor import DocumentProcessor
 from llm_service import LLMService
 from extensions import ProgressTracker
+from agentic_service import AgenticRAGService
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,19 @@ class EnhancedSimpleRAG:
         
         # Initialize all services
         self._initialize_services()
+        # 6. Agentic AI Service (after all other services are ready)
+        try:
+            if self.is_ready():  # Only initialize if basic services are ready
+                self.agentic_service = AgenticRAGService(self.config, self)
+                logger.info("✓ Agentic AI service initialized")
+            else:
+                self.agentic_service = None
+                self.initialization_warnings.append("Agentic AI service skipped - basic services not ready")
+        except Exception as e:
+            error_msg = f"Failed to initialize Agentic AI service: {str(e)}"
+            logger.error(error_msg)
+            self.initialization_errors.append(error_msg)
+            self.agentic_service = None
         
         # Log final status
         self._log_initialization_status()
@@ -134,6 +148,25 @@ class EnhancedSimpleRAG:
             logger.error(error_msg)
             self.initialization_errors.append(error_msg)
     
+    def is_agentic_ready(self) -> bool:
+        """Check if Agentic AI functionality is ready."""
+        return (self.agentic_service is not None and 
+                self.agentic_service.is_available())
+
+    def query_agentic(self, question: str, session_id: str = None) -> Dict[str, Any]:
+        """Query using the agentic approach with autonomous tool selection."""
+        if not self.is_agentic_ready():
+            return {
+                "answer": "Agentic AI not available. Please check Claude API configuration.",
+                "reasoning_steps": [],
+                "tools_used": [],
+                "success": False
+            }
+        
+        return self.agentic_service.process_agentic_query(question, session_id)
+
+
+
     def _log_initialization_status(self):
         """Log the final initialization status."""
         if self.initialization_errors:
@@ -166,13 +199,15 @@ class EnhancedSimpleRAG:
         status = {
             "ready": self.is_ready(),
             "graph_ready": self.is_graph_ready(),
+            "agentic_ready": self.is_agentic_ready(),
             "rag_mode": self.rag_mode,
             "services": {
                 "document_processor": self.document_processor is not None,
                 "embedding_service": self.embedding_service is not None,
                 "vector_db_service": self.vector_db_service is not None and self.vector_db_service.is_available(),
                 "llm_service": self.llm_service is not None,
-                "graph_rag_service": self.graph_rag_service is not None
+                "graph_rag_service": self.graph_rag_service is not None,
+                "agentic_service": self.agentic_service is not None  # ADD THIS LINE
             },
             "initialization_errors": self.initialization_errors,
             "initialization_warnings": self.initialization_warnings
@@ -190,7 +225,8 @@ class EnhancedSimpleRAG:
         
         if self.graph_rag_service:
             status["graph_stats"] = self.graph_rag_service.get_graph_stats()
-        
+        if self.agentic_service:
+            status["agentic_stats"] = self.agentic_service.get_agentic_stats()
         return status
     
     def set_rag_mode(self, mode: str):

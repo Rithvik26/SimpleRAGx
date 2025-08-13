@@ -11,3 +11,6 @@ gunicorn==21.2.0
 markdown 
 networkx>=3.0
 pathlib2>=2.3.0
+langchain 
+langchain-anthropic 
+langchain-core

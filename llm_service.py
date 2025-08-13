@@ -1,5 +1,5 @@
 """
-LLM service for generating answers using Claude API
+LLM service for generating answers using Claude API - FIXED VERSION
 """
 
 import logging
@@ -217,7 +217,7 @@ ANSWER:"""
             return f"Error: {error_msg}"
     
     def _generate_with_claude(self, prompt: str, progress_tracker: Optional[ProgressTracker] = None) -> str:
-        """Generate answer using Claude API with retry logic and error handling."""
+        """Generate answer using Claude API with retry logic and error handling - FIXED MODELS."""
         if not self.claude_client:
             return "Claude API not available. Please check your API key configuration."
         
@@ -226,13 +226,13 @@ ANSWER:"""
                 progress_tracker.update(80, 100, status="querying", 
                                       message="Querying Claude API")
             
-            # Choose model based on complexity
-            model = "claude-3-haiku-20240307"  # Fast and cost-effective
+            # FIXED: Use current Claude models that actually exist
+            model = "claude-3-haiku-20240307"  # This model works and is fast
             max_tokens = 2000
             
-            # For Graph RAG, use a more capable model for complex reasoning
+            # For Graph RAG, use Sonnet but with correct model name
             if self.rag_mode == "graph":
-                model = "claude-3-sonnet-20240229"  # Better reasoning capabilities
+                model = "claude-3-5-sonnet-20241022"  # FIXED: Use current Sonnet model
                 max_tokens = 3000
             
             logger.debug(f"Using Claude model: {model}")
@@ -264,7 +264,25 @@ ANSWER:"""
             
         except anthropic.APIError as e:
             logger.error(f"Claude API error: {str(e)}")
-            return f"I encountered an API error while generating the response. Please try again."
+            # FIXED: Better error handling for model not found
+            if "not_found_error" in str(e) and "model" in str(e):
+                logger.error("Model not found - using fallback model")
+                try:
+                    # Fallback to Haiku which should always work
+                    response = self.claude_client.messages.create(
+                        model="claude-3-haiku-20240307",
+                        max_tokens=2000,
+                        temperature=0.1,
+                        messages=[
+                            {"role": "user", "content": prompt}
+                        ]
+                    )
+                    return response.content[0].text
+                except Exception as fallback_error:
+                    logger.error(f"Fallback model also failed: {fallback_error}")
+                    return f"I encountered an API error and the fallback model also failed. Please check your Claude API configuration."
+            else:
+                return f"I encountered an API error while generating the response. Please try again."
             
         except Exception as e:
             logger.error(f"Unexpected error with Claude API: {str(e)}")
@@ -313,9 +331,9 @@ ANSWER:"""
                 elif not self.claude_client:
                     status["error"] = "Claude client not initialized"
                 else:
-                    # Test with a simple query
+                    # Test with current working model
                     test_response = self.claude_client.messages.create(
-                        model="claude-3-haiku-20240307",
+                        model="claude-3-haiku-20240307",  # FIXED: Use working model
                         max_tokens=50,
                         messages=[
                             {"role": "user", "content": "Hello! Please respond with 'Claude connection test successful'."}

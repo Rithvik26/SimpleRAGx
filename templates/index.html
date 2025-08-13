@@ -73,6 +73,34 @@
     </div>
 </div>
 
+<!-- NEW: Add Agentic AI section -->
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-gradient text-white" style="background: linear-gradient(45deg, #6f42c1, #007bff);">
+                <h4 class="mb-0">🤖 Agentic AI Assistant</h4>
+            </div>
+            <div class="card-body">
+                <h5>Autonomous Multi-Tool Intelligence</h5>
+                <ul>
+                    <li>Autonomous tool selection and planning</li>
+                    <li>Multi-step reasoning with LangChain agents</li>
+                    <li>Combines document search, graph analysis, and verification</li>
+                    <li>Transparent reasoning with step-by-step explanations</li>
+                </ul>
+                <p class="text-muted">Perfect for complex queries requiring multiple analysis approaches and verification.</p>
+                {% if is_configured %}
+                <a href="{{ url_for('agentic_interface') }}" class="btn btn-gradient" style="background: linear-gradient(45deg, #6f42c1, #007bff); color: white;">
+                    Try Agentic AI
+                </a>
+                {% else %}
+                <span class="text-muted">Configure API keys to enable</span>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+ </div>
+
 <div class="row mt-4">
     <div class="col-md-4">
         <h3>📄 Document Support</h3>

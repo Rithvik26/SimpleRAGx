@@ -33,7 +33,10 @@ DEFAULT_CONFIG = {
     "graph_reasoning_depth": 2,
     "entity_similarity_threshold": 0.8,
     "graph_extraction_timeout": 45,
-    "max_chunk_length_for_graph": 2000
+    "max_chunk_length_for_graph": 2000,
+    "enable_agentic_ai": True,
+    "agentic_max_iterations": 5,
+    "agentic_temperature": 0.1,
 }
 
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "/tmp/simplerag_config.json")  # Use temp file instead
