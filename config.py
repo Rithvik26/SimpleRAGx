@@ -37,6 +37,8 @@ DEFAULT_CONFIG = {
     "enable_agentic_ai": True,
     "agentic_max_iterations": 5,
     "agentic_temperature": 0.1,
+
+    
 }
 
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "/tmp/simplerag_config.json")  # Use temp file instead
