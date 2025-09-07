@@ -37,6 +37,7 @@ DEFAULT_CONFIG = {
     "enable_agentic_ai": True,
     "agentic_max_iterations": 5,
     "agentic_temperature": 0.1,
+
      # Neo4j Configuration
     "neo4j_uri": "",
     "neo4j_username": "neo4j", 
