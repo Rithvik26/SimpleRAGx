@@ -27,10 +27,15 @@ def nl2br_filter(text):
     """Convert newlines to HTML breaks and process markdown."""
     if not text:
         return ""
-    # First convert <br> tags to newlines if any
-    text = re.sub(r'<br\s*/?>', '\n', text)
+    
+    # Clean any existing HTML tags first
+    import re
+    # Remove any stray HTML tags that shouldn't be there
+    text = re.sub(r'<(?!/?(?:br|p|div|span|a|strong|em|ul|ol|li|h[1-6]|blockquote|code|pre)\b)[^>]+>', '', text)
+    
     # Convert markdown to HTML
-    html = markdown.markdown(text)
+    html = markdown.markdown(text, extensions=['nl2br', 'fenced_code'])
+    
     return html
 
 # Ensure upload directory exists
@@ -191,7 +196,17 @@ def setup():
             if value and value != config_manager.get(key, ''):
                 updates[key] = value
                 config_changed = True
-        
+        if 'neo4j_enabled' in request.form:
+            updates["neo4j_enabled"] = True
+        else:
+            updates["neo4j_enabled"] = False
+
+        neo4j_fields = ["neo4j_uri", "neo4j_username", "neo4j_password"]
+        for field in neo4j_fields:
+            value = request.form.get(field, '').strip()
+            if value != config_manager.get(field, ''):
+                updates[field] = value
+                config_changed = True
         # Handle numeric settings
         numeric_fields = {
             "chunk_size": (100, 5000, 1000),
@@ -322,8 +337,12 @@ def upload():
         
         # Get RAG mode
         upload_rag_mode = request.form.get('rag_mode', 'normal')
-        if upload_rag_mode not in ['normal', 'graph']:
+        if upload_rag_mode not in ['normal', 'graph', 'neo4j']:
             upload_rag_mode = 'normal'
+            
+        if upload_rag_mode == 'neo4j' and not simplerag_instance.is_neo4j_ready():
+            flash('Neo4j service not available. Please configure Neo4j settings first.', 'danger')
+            return redirect(url_for('setup'))
         
         # Check if SimpleRAG is ready
         config = get_config_manager().get_all()
@@ -425,9 +444,22 @@ def query():
             return redirect(url_for('setup'))
         
         # Switch RAG mode if specified
-        if query_rag_mode and query_rag_mode in ['normal', 'graph']:
+        if query_rag_mode and query_rag_mode in ['normal', 'graph', 'hybrid_neo4j']:
             current_mode = simplerag_instance.rag_mode
-            if query_rag_mode != current_mode:
+            
+            # Special handling for hybrid_neo4j mode
+            if query_rag_mode == 'hybrid_neo4j':
+                if not simplerag_instance.is_graph_ready():
+                    flash('Graph RAG not available for hybrid mode', 'warning')
+                    query_rag_mode = 'normal'
+                elif not simplerag_instance.is_neo4j_ready():
+                    flash('Neo4j not available, using Graph RAG only', 'warning')
+                    query_rag_mode = 'graph'
+                else:
+                    # Temporarily set to hybrid mode for this query
+                    simplerag_instance.rag_mode = 'hybrid_neo4j'
+            
+            if query_rag_mode != current_mode and query_rag_mode != 'hybrid_neo4j':
                 try:
                     simplerag_instance.set_rag_mode(query_rag_mode)
                     logger.info(f"RAG mode temporarily changed to {query_rag_mode} for query")
@@ -442,11 +474,8 @@ def query():
         
         # Determine async processing
         current_mode = simplerag_instance.rag_mode
-        use_async = (
-            len(question) > 100 or 
-            request.form.get('async', 'false') == 'true' or 
-            current_mode == 'graph'
-        )
+        use_async = True
+
         
         if use_async:
             in_progress = True

@@ -9,6 +9,7 @@ from collections import defaultdict
 from typing import Dict, Any, List, Optional, Set, Tuple
 from extensions import ProgressTracker
 from graph_extractor import GraphExtractor
+from neo4j_service import Neo4jService  # Add this import
 
 logger = logging.getLogger(__name__)
 

@@ -49,6 +49,15 @@
                         <small class="text-muted">Better for complex queries about relationships and connections</small>
                     </div>
                 </div>
+                <div class="form-check">
+                    <input class="form-check-input" type="radio" name="rag_mode" id="query_hybrid_neo4j" value="hybrid_neo4j">
+                    <label class="form-check-label" for="query_hybrid_neo4j">
+                        <strong>Hybrid Graph + Neo4j</strong> - Combined Graph RAG with Neo4j Cypher queries
+                    </label>
+                    <div class="form-text ms-4">
+                        <small class="text-muted">Best for complex relationship queries - combines vector search, knowledge graph, and Neo4j graph database</small>
+                    </div>
+                </div>
             </div>
             
             <input type="hidden" name="async" id="async-input" value="false">
