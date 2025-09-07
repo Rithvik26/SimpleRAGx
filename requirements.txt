@@ -14,3 +14,4 @@ pathlib2>=2.3.0
 langchain 
 langchain-anthropic 
 langchain-core
+neo4j>=5.0.0

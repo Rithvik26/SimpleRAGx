@@ -43,6 +43,54 @@
         </div>
     </div>
     
+    <!-- NEW: Neo4j Configuration Section -->
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5>Neo4j Database Configuration</h5>
+        </div>
+        <div class="card-body">
+            <div class="form-check mb-3">
+                <input class="form-check-input" type="checkbox" id="neo4j_enabled" name="neo4j_enabled" 
+                       {% if config.neo4j_enabled %}checked{% endif %}>
+                <label class="form-check-label" for="neo4j_enabled">
+                    <strong>Enable Neo4j Integration</strong>
+                </label>
+                <div class="form-text">Enable to use Neo4j graph database for storing knowledge graphs</div>
+            </div>
+            
+            <div class="mb-3">
+                <label for="neo4j_uri" class="form-label">Neo4j URI</label>
+                <input type="text" class="form-control" id="neo4j_uri" name="neo4j_uri" 
+                       value="{{ config.neo4j_uri }}" placeholder="neo4j+s://your-instance.databases.neo4j.io">
+                <div class="form-text">Connection URI for your Neo4j instance. Get from <a href="https://neo4j.com/cloud/aura/" target="_blank">Neo4j Aura</a> or your self-hosted instance.</div>
+            </div>
+            
+            <div class="mb-3">
+                <label for="neo4j_username" class="form-label">Neo4j Username</label>
+                <input type="text" class="form-control" id="neo4j_username" name="neo4j_username" 
+                       value="{{ config.neo4j_username }}" placeholder="neo4j">
+                <div class="form-text">Username for Neo4j authentication (default is usually 'neo4j')</div>
+            </div>
+            
+            <div class="mb-3">
+                <label for="neo4j_password" class="form-label">Neo4j Password</label>
+                <input type="password" class="form-control" id="neo4j_password" name="neo4j_password" 
+                       value="{{ config.neo4j_password }}">
+                <div class="form-text">Password for Neo4j authentication</div>
+            </div>
+            
+            <div class="alert alert-info">
+                <strong>ℹ️ Neo4j Setup Instructions:</strong>
+                <ol class="mb-0">
+                    <li>Create a free Neo4j Aura instance at <a href="https://neo4j.com/cloud/aura/" target="_blank">neo4j.com/cloud/aura</a></li>
+                    <li>Copy the connection URI, username, and password from your instance details</li>
+                    <li>Enable Neo4j integration and enter the credentials above</li>
+                    <li>You can then use the "Neo4j Only" upload mode to store knowledge graphs</li>
+                </ol>
+            </div>
+        </div>
+    </div>
+    
     <!-- NEW: Add RAG Mode Settings Section -->
     <div class="card mb-4">
         <div class="card-header">
@@ -66,6 +114,14 @@
                         <strong>Graph RAG</strong> - Knowledge graph with entities and relationships
                     </label>
                     <div class="form-text ms-4">Advanced reasoning, better for complex queries and relationships</div>
+                </div>
+                <div class="form-check">
+                    <input class="form-check-input" type="radio" name="rag_mode" id="neo4j_rag" value="neo4j" 
+                           {% if config.rag_mode == 'neo4j' %}checked{% endif %}>
+                    <label class="form-check-label" for="neo4j_rag">
+                        <strong>Neo4j Mode</strong> - Store directly in Neo4j graph database
+                    </label>
+                    <div class="form-text ms-4">Pure graph storage without vector embeddings, requires Neo4j configuration</div>
                 </div>
             </div>
         </div>
@@ -153,4 +209,42 @@
         <button type="submit" class="btn btn-primary">Save Configuration</button>
     </div>
 </form>
+
+<!-- JavaScript to handle Neo4j section visibility -->
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const neo4jEnabled = document.getElementById('neo4j_enabled');
+    const neo4jFields = ['neo4j_uri', 'neo4j_username', 'neo4j_password'];
+    const neo4jRadio = document.getElementById('neo4j_rag');
+    
+    function toggleNeo4jFields() {
+        const isEnabled = neo4jEnabled.checked;
+        neo4jFields.forEach(fieldId => {
+            const field = document.getElementById(fieldId);
+            field.disabled = !isEnabled;
+            if (!isEnabled) {
+                field.classList.add('bg-light');
+            } else {
+                field.classList.remove('bg-light');
+            }
+        });
+        
+        // Disable Neo4j RAG mode if Neo4j is not enabled
+        if (!isEnabled) {
+            neo4jRadio.disabled = true;
+            if (neo4jRadio.checked) {
+                document.getElementById('normal_rag').checked = true;
+            }
+        } else {
+            neo4jRadio.disabled = false;
+        }
+    }
+    
+    // Initial toggle
+    toggleNeo4jFields();
+    
+    // Listen for changes
+    neo4jEnabled.addEventListener('change', toggleNeo4jFields);
+});
+</script>
 {% endblock %}

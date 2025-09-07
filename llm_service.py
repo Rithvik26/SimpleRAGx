@@ -6,7 +6,7 @@ import logging
 from typing import List, Dict, Any, Optional
 import anthropic
 from extensions import ProgressTracker
-
+import html,re
 logger = logging.getLogger(__name__)
 
 class LLMService:
@@ -300,19 +300,35 @@ ANSWER:"""
             "Note: This is raw mode output. Configure Claude API key for processed responses."
         ]
         return "\n".join(lines)
-    
     def _post_process_answer(self, answer: str) -> str:
         """Post-process the LLM answer for better formatting and quality."""
-        # Remove excessive whitespace
+        """Clean Claude/LLM output by unescaping HTML, stripping tags, removing markdown, and normalizing spacing."""
+        if not answer:
+            return ""
+
+        # Step 1: Trim whitespace
         answer = answer.strip()
-        
-        # Ensure proper paragraph spacing
-        import re
-        answer = re.sub(r'\n\s*\n\s*\n+', '\n\n', answer)
-        
-        # Fix common formatting issues
-        answer = answer.replace('  ', ' ')  # Remove double spaces
-        
+
+        # Step 2: Unescape HTML entities (&lt;, &gt;, &amp;)
+        answer = html.unescape(answer)
+
+        # Step 3: Remove HTML tags if any exist
+        answer = re.sub(r'<[^>]+>', '', answer)
+
+        # Step 4: Remove common Markdown formatting
+        # Bold/italic
+        answer = re.sub(r'\*\*(.*?)\*\*', r'\1', answer)  # **bold**
+        answer = re.sub(r'\*(.*?)\*', r'\1', answer)      # *italic*
+        answer = re.sub(r'__(.*?)__', r'\1', answer)      # __bold__
+        answer = re.sub(r'_(.*?)_', r'\1', answer)        # _italic_
+        # Headings, bullet points
+        answer = re.sub(r'^\s*#+\s*', '', answer, flags=re.MULTILINE)
+        answer = re.sub(r'^\s*[-*]\s*', '', answer, flags=re.MULTILINE)
+
+        # Step 5: Normalize whitespace
+        answer = re.sub(r'\n\s*\n\s*\n+', '\n\n', answer)  # collapse triple newlines
+        answer = re.sub(r' {2,}', ' ', answer)  # collapse multiple spaces
+
         return answer
     
     def test_connection(self) -> Dict[str, Any]:
@@ -366,3 +382,138 @@ ANSWER:"""
             "claude_client_available": self.claude_client is not None,
             "service_available": self.is_available()
         }
+    
+    
+    def generate_hybrid_neo4j_answer(self, query: str, contexts: List[Dict[str, Any]], 
+                             graph_context: Dict[str, Any], 
+                             progress_tracker: Optional[ProgressTracker] = None) -> str:
+        """Generate answer using Graph RAG + Neo4j hybrid approach."""
+        
+        # Separate contexts by type
+        document_contexts = []
+        entity_contexts = []
+        relationship_contexts = []
+        neo4j_contexts = []
+        
+        for ctx in contexts:
+            ctx_type = ctx['metadata'].get('type', 'document')
+            if ctx_type == 'entity':
+                entity_contexts.append(ctx)
+            elif ctx_type == 'relationship':
+                relationship_contexts.append(ctx)
+            elif ctx_type == 'neo4j_result':
+                neo4j_contexts.append(ctx)
+            else:
+                document_contexts.append(ctx)
+        
+        # Format each context type
+        document_text = ""
+        if document_contexts:
+            doc_sections = []
+            for i, ctx in enumerate(document_contexts[:3]):
+                filename = ctx['metadata'].get('filename', 'Unknown Document')
+                score = ctx.get('score', 0)
+                text = ctx['text']
+                doc_sections.append(f"Document {i+1}: {filename} (Score: {score:.2f})\n{text}")
+            document_text = "\n\n".join(doc_sections)
+        
+        # Format entity context
+        entities_text = ""
+        if entity_contexts:
+            entity_sections = []
+            for ctx in entity_contexts[:5]:
+                entity_name = ctx['metadata'].get('entity_name', 'Unknown Entity')
+                entity_type = ctx['metadata'].get('entity_type', 'Unknown')
+                description = ctx['metadata'].get('description', '')
+                score = ctx.get('score', 0)
+                
+                entity_info = f"• {entity_name} ({entity_type})"
+                if description:
+                    entity_info += f": {description}"
+                entity_info += f" [Relevance: {score:.2f}]"
+                entity_sections.append(entity_info)
+            
+            entities_text = "\n".join(entity_sections)
+        
+        # Format relationship context
+        relationships_text = ""
+        if relationship_contexts:
+            rel_sections = []
+            for ctx in relationship_contexts[:5]:
+                source = ctx['metadata'].get('source', 'Unknown')
+                target = ctx['metadata'].get('target', 'Unknown')
+                relationship = ctx['metadata'].get('relationship', 'unknown')
+                description = ctx['metadata'].get('description', '')
+                score = ctx.get('score', 0)
+                
+                rel_info = f"• {source} → {relationship} → {target}"
+                if description:
+                    rel_info += f" ({description})"
+                rel_info += f" [Relevance: {score:.2f}]"
+                rel_sections.append(rel_info)
+            
+            relationships_text = "\n".join(rel_sections)
+        
+        # Format Neo4j context
+        neo4j_text = ""
+        if neo4j_contexts:
+            neo4j_sections = []
+            for i, ctx in enumerate(neo4j_contexts):
+                neo4j_sections.append(f"Neo4j Result {i+1}:\n{ctx['text']}")
+            neo4j_text = "\n\n".join(neo4j_sections)
+        
+        # Create comprehensive prompt for Hybrid mode - UPDATED PROMPT
+        prompt = f"""You are an advanced AI assistant that answers questions using multiple knowledge sources:
+    1. Document content (traditional text chunks)
+    2. Knowledge graph (extracted entities and relationships)
+    3. Neo4j graph database (structured graph queries)
+
+    You excel at synthesizing information from all these sources to provide the most comprehensive and accurate answer.
+
+    USER QUESTION: {query}
+
+    AVAILABLE INFORMATION:
+    """
+        
+        if document_text:
+            prompt += f"""
+    DOCUMENT CONTEXT:
+    {document_text}
+    """
+        
+        if entities_text:
+            prompt += f"""
+    RELEVANT ENTITIES (from knowledge graph):
+    {entities_text}
+    """
+        
+        if relationships_text:
+            prompt += f"""
+    RELEVANT RELATIONSHIPS (from knowledge graph):
+    {relationships_text}
+    """
+        
+        if neo4j_text:
+            prompt += f"""
+    NEO4J GRAPH DATABASE RESULTS:
+    {neo4j_text}
+    """
+        
+        prompt += f"""
+    INSTRUCTIONS:
+    1. Provide a comprehensive answer that leverages ALL available information sources
+    2. When Neo4j results provide specific relationship data, prioritize these as they come from structured graph queries
+    3. Use document context for detailed explanations and background information
+    4. Use knowledge graph entities and relationships to understand connections
+    5. Clearly indicate when information comes from different sources if relevant
+    6. If sources provide conflicting information, note the discrepancy and explain possible reasons
+    7. Structure your answer logically, building from facts to relationships to insights
+
+    
+
+    Focus on providing the most complete and accurate answer by synthesizing all available information.
+
+    ANSWER:"""
+        
+        return self._generate_with_llm(prompt, progress_tracker)
+        

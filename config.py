@@ -38,6 +38,12 @@ DEFAULT_CONFIG = {
     "agentic_max_iterations": 5,
     "agentic_temperature": 0.1,
 
+     # Neo4j Configuration
+    "neo4j_uri": "",
+    "neo4j_username": "neo4j", 
+    "neo4j_password": "",
+    "neo4j_enabled": False,
+
     
 }
 
@@ -46,8 +52,9 @@ CONFIG_PATH = os.environ.get("CONFIG_PATH", "/tmp/simplerag_config.json")  # Use
 class ConfigManager:
     """Manages configuration loading, saving, and validation."""
     
-    def __init__(self, config_path: str = None):
+    def __init__(self, config_path: str = None, force_fresh_start: bool = False):
         self.config_path = config_path or CONFIG_PATH
+        self.force_fresh_start = force_fresh_start  # FIX: Initialize the missing attribute
         self.config = self._load_config()
     
     def _ensure_config_dir_exists(self):
@@ -58,24 +65,58 @@ class ConfigManager:
         """Load configuration from file or create default."""
         self._ensure_config_dir_exists()
         
-        # Always start with clean defaults - don't load from existing file
+        # Start with defaults
         config = DEFAULT_CONFIG.copy()
         
-        # Only apply environment variables if explicitly set for production
-        # Remove this line: self._apply_env_overrides(config)
+        # NEW: Check for dev_config.json first (for development)
+        dev_config_path = 'dev_config.json'
+        dev_config = {}  # Initialize empty dict
+        if os.path.exists(dev_config_path):
+            try:
+                with open(dev_config_path, 'r') as f:
+                    dev_config = json.load(f)
+                    # Merge dev config with existing config
+                    config.update(dev_config)
+                    # NEW: Mark setup as completed if we have dev config
+                    config["setup_completed"] = True
+                    logger.info("Loaded development configuration from dev_config.json")
+            except Exception as e:
+                logger.error(f"Error loading dev_config.json: {e}")
+        
+        # FIXED: Only load existing config if not forcing fresh start
+        # and if setup was previously completed
+        if not self.force_fresh_start and os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, 'r') as f:
+                    saved_config = json.load(f)
+                    
+                    # FIXED: Only merge if setup was completed before
+                    if saved_config.get("setup_completed", False) or config.get("setup_completed", False):
+                        # Don't overwrite dev_config values
+                        for key, value in saved_config.items():
+                            if key not in dev_config or key == "setup_completed":
+                                config[key] = value
+                        logger.info(f"Loaded configuration from {self.config_path}")
+                    else:
+                        logger.info("Previous setup incomplete, using defaults")
+                        # Save fresh defaults
+                        self._save_config(config)
+            except Exception as e:
+                logger.error(f"Error loading config file: {e}")
+                logger.info("Using default configuration")
+                self._save_config(config)
+        else:
+            if self.force_fresh_start:
+                logger.info("Force fresh start - using default configuration")
+            else:
+                logger.info(f"No config file found at {self.config_path}, using defaults")
+            # Save the default config
+            self._save_config(config)
+        
+        # Apply environment variable overrides if present
+        self._apply_env_overrides(config)
         
         return config
-        
-        # Comment out or remove all the file loading logic:
-        # if not os.path.exists(self.config_path):
-        #     logger.info(f"Creating default configuration at {self.config_path}")
-        #     self._save_config(DEFAULT_CONFIG)
-        #     return DEFAULT_CONFIG.copy()
-        # 
-        # try:
-        #     with open(self.config_path, 'r') as f:
-        #         config = json.load(f)
-        #     ...etc
     
     def _apply_env_overrides(self, config: Dict[str, Any]):
         """Apply environment variable overrides."""
@@ -87,7 +128,15 @@ class ConfigManager:
             "collection_name": "QDRANT_COLLECTION",
             "graph_collection_name": "QDRANT_GRAPH_COLLECTION"
         }
-        
+         # Neo4j overrides
+        if os.getenv("NEO4J_URI"):
+            config["neo4j_uri"] = os.getenv("NEO4J_URI")
+        if os.getenv("NEO4J_USERNAME"):
+            config["neo4j_username"] = os.getenv("NEO4J_USERNAME")
+        if os.getenv("NEO4J_PASSWORD"):
+            config["neo4j_password"] = os.getenv("NEO4J_PASSWORD")
+        if os.getenv("NEO4J_ENABLED"):
+            config["neo4j_enabled"] = os.getenv("NEO4J_ENABLED").lower() == "true"
         for config_key, env_key in env_overrides.items():
             env_value = os.environ.get(env_key)
             if env_value:  # Only override if env var exists
@@ -185,8 +234,8 @@ class ConfigManager:
                     validation_result["valid"] = False
         
         # Validate mode settings
-        if self.config.get("rag_mode") not in ["normal", "graph"]:
-            validation_result["errors"].append("rag_mode must be 'normal' or 'graph'")
+        if self.config.get("rag_mode") not in ["normal", "graph", "neo4j", "hybrid_neo4j"]:
+            validation_result["errors"].append("rag_mode must be 'normal', 'graph', 'neo4j', or 'hybrid_neo4j'")
             validation_result["valid"] = False
         
         if self.config.get("preferred_llm") not in ["claude", "raw"]:
