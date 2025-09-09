@@ -233,15 +233,23 @@ class EnhancedSimpleRAG:
         return status
     
     def set_rag_mode(self, mode: str):
-        """Switch between 'normal', 'graph', and 'neo4j' RAG modes."""
-        if mode not in ["normal", "graph", "neo4j"]:
-            raise ValueError("RAG mode must be 'normal', 'graph', or 'neo4j'")
+        """Switch between 'normal', 'graph', 'neo4j', and 'hybrid_neo4j' RAG modes."""
+        # Update the valid modes list to include hybrid_neo4j
+        if mode not in ["normal", "graph", "neo4j", "hybrid_neo4j"]:
+            raise ValueError("RAG mode must be 'normal', 'graph', 'neo4j', or 'hybrid_neo4j'")
         
         if mode == "graph" and not self.is_graph_ready():
             raise RuntimeError("Graph RAG mode not available - check service initialization")
         
         if mode == "neo4j" and not self.is_neo4j_ready():
             raise RuntimeError("Neo4j mode not available - check Neo4j configuration")
+        
+        # Add check for hybrid_neo4j mode
+        if mode == "hybrid_neo4j":
+            if not self.is_graph_ready():
+                raise RuntimeError("Graph RAG not available for hybrid mode")
+            if not self.is_neo4j_ready():
+                raise RuntimeError("Neo4j not available for hybrid mode")
         
         old_mode = self.rag_mode
         self.rag_mode = mode
