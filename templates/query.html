@@ -6,7 +6,7 @@
 <h2>Ask Questions</h2>
 <p>Ask questions about your indexed documents using your preferred RAG mode.</p>
 
-<!-- NEW: Add current mode display -->
+<!-- Current mode display -->
 <div class="alert alert-info">
     <strong>Current RAG Mode:</strong> 
     <span class="badge bg-{{ 'success' if config.rag_mode == 'graph' else 'primary' }}">
@@ -29,7 +29,7 @@
                        placeholder="What would you like to know about your documents?">
             </div>
             
-            <!-- NEW: Add RAG mode selection for query -->
+            <!-- RAG mode selection for query -->
             <div class="mb-3">
                 <label class="form-label">RAG Mode for this Query</label>
                 <div class="form-check">
@@ -58,6 +58,16 @@
                         <small class="text-muted">Best for complex relationship queries - combines vector search, knowledge graph, and Neo4j graph database</small>
                     </div>
                 </div>
+                <!-- NEW: Parallel mode option -->
+                <div class="form-check">
+                    <input class="form-check-input" type="radio" name="rag_mode" id="query_parallel" value="parallel">
+                    <label class="form-check-label" for="query_parallel">
+                        <strong>🚀 Parallel Mode</strong> - Run all modes simultaneously
+                    </label>
+                    <div class="form-text ms-4">
+                        <small class="text-muted">Compare results from all three modes with performance analytics</small>
+                    </div>
+                </div>
             </div>
             
             <input type="hidden" name="async" id="async-input" value="false">
@@ -66,7 +76,205 @@
     </div>
 </div>
 
-{% if in_progress %}
+<!-- Parallel Results Display -->
+{% if parallel_results %}
+<div class="card mt-4">
+    <div class="card-header bg-info text-white">
+        <h5 class="mb-0">🚀 Parallel Mode Results</h5>
+    </div>
+    <div class="card-body">
+        <!-- Performance Analytics -->
+        <div class="alert alert-light border mb-4">
+            <h6 class="alert-heading">Performance Analytics</h6>
+            <div class="row">
+                <div class="col-md-3">
+                    <strong>Fastest Mode:</strong>
+                    <span class="badge bg-success">{{ parallel_results.analytics.fastest_mode|title }}</span>
+                </div>
+                <div class="col-md-3">
+                    <strong>Total Time:</strong>
+                    <span class="badge bg-primary">{{ parallel_results.analytics.total_time }}s</span>
+                </div>
+                <div class="col-md-3">
+                    <strong>Average Time:</strong>
+                    <span class="badge bg-secondary">{{ parallel_results.analytics.average_time }}s</span>
+                </div>
+                <div class="col-md-3">
+                    <strong>Successful:</strong>
+                    <span class="badge bg-info">{{ parallel_results.analytics.successful_modes }}/3</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Results Tabs -->
+        <ul class="nav nav-tabs" id="parallelResultsTabs" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active" id="normal-tab" data-bs-toggle="tab" data-bs-target="#normal-result" type="button" role="tab">
+                    Normal RAG
+                    <span class="badge bg-secondary ms-1">{{ parallel_results.results.normal.time }}s</span>
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="graph-tab" data-bs-toggle="tab" data-bs-target="#graph-result" type="button" role="tab">
+                    Graph RAG
+                    <span class="badge bg-secondary ms-1">{{ parallel_results.results.graph.time }}s</span>
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="hybrid-tab" data-bs-toggle="tab" data-bs-target="#hybrid-result" type="button" role="tab">
+                    Hybrid Neo4j
+                    <span class="badge bg-secondary ms-1">{{ parallel_results.results.hybrid_neo4j.time }}s</span>
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="comparison-tab" data-bs-toggle="tab" data-bs-target="#comparison-view" type="button" role="tab">
+                    📊 Comparison
+                </button>
+            </li>
+        </ul>
+
+        <div class="tab-content mt-3" id="parallelResultsContent">
+            <!-- Normal RAG Result -->
+            <div class="tab-pane fade show active" id="normal-result" role="tabpanel">
+                <div class="result-container">
+                    {% if parallel_results.results.normal.error %}
+                        <div class="alert alert-danger">
+                            <strong>Error:</strong> {{ parallel_results.results.normal.error }}
+                        </div>
+                    {% elif parallel_results.results.normal.answer %}
+                        <div class="answer-text">
+                            {{ parallel_results.results.normal.answer | replace('\n', '<br>') | safe }}
+                        </div>
+                    {% else %}
+                        <div class="alert alert-warning">No result available</div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Graph RAG Result -->
+            <div class="tab-pane fade" id="graph-result" role="tabpanel">
+                <div class="result-container">
+                    {% if parallel_results.results.graph.error %}
+                        <div class="alert alert-danger">
+                            <strong>Error:</strong> {{ parallel_results.results.graph.error }}
+                        </div>
+                    {% elif parallel_results.results.graph.answer %}
+                        <div class="answer-text">
+                            {{ parallel_results.results.graph.answer | replace('\n', '<br>') | safe }}
+                        </div>
+                    {% else %}
+                        <div class="alert alert-warning">No result available</div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Hybrid Neo4j Result -->
+            <div class="tab-pane fade" id="hybrid-result" role="tabpanel">
+                <div class="result-container">
+                    {% if parallel_results.results.hybrid_neo4j.error %}
+                        <div class="alert alert-danger">
+                            <strong>Error:</strong> {{ parallel_results.results.hybrid_neo4j.error }}
+                        </div>
+                    {% elif parallel_results.results.hybrid_neo4j.answer %}
+                        <div class="answer-text">
+                            {{ parallel_results.results.hybrid_neo4j.answer | replace('\n', '<br>') | safe }}
+                        </div>
+                    {% else %}
+                        <div class="alert alert-warning">No result available</div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Comparison View -->
+<div class="tab-pane fade" id="comparison-view" role="tabpanel">
+    <div class="row">
+        <div class="col-12">
+            <h6>Performance Comparison</h6>
+            <div style="position: relative; height: 300px; width: 100%; max-width: 600px; margin: 0 auto;">
+                <canvas id="performanceChart"></canvas>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Performance Table -->
+    <div class="row mt-4">
+        <div class="col-12">
+            <h6>Detailed Performance Metrics</h6>
+            {% set min_time = [parallel_results.results.normal.time, parallel_results.results.graph.time, parallel_results.results.hybrid_neo4j.time] | select | min %}
+            <table class="table table-sm table-hover">
+                <thead>
+                    <tr>
+                        <th>Mode</th>
+                        <th>Time (s)</th>
+                        <th>Status</th>
+                        <th>Relative Speed</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Normal RAG</strong></td>
+                        <td>{{ parallel_results.results.normal.time }}s</td>
+                        <td>
+                            {% if parallel_results.results.normal.error %}
+                                <span class="badge bg-danger">Error</span>
+                            {% else %}
+                                <span class="badge bg-success">Success</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if parallel_results.results.normal.time > 0 and not parallel_results.results.normal.error %}
+                                {{ ((parallel_results.results.normal.time / min_time * 100) | round(0)) }}%
+                            {% else %}
+                                N/A
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><strong>Graph RAG</strong></td>
+                        <td>{{ parallel_results.results.graph.time }}s</td>
+                        <td>
+                            {% if parallel_results.results.graph.error %}
+                                <span class="badge bg-danger">Error</span>
+                            {% else %}
+                                <span class="badge bg-success">Success</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if parallel_results.results.graph.time > 0 and not parallel_results.results.graph.error %}
+                                {{ ((parallel_results.results.graph.time / min_time * 100) | round(0)) }}%
+                            {% else %}
+                                N/A
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><strong>Hybrid Neo4j</strong></td>
+                        <td>{{ parallel_results.results.hybrid_neo4j.time }}s</td>
+                        <td>
+                            {% if parallel_results.results.hybrid_neo4j.error %}
+                                <span class="badge bg-danger">Error</span>
+                            {% else %}
+                                <span class="badge bg-success">Success</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if parallel_results.results.hybrid_neo4j.time > 0 and not parallel_results.results.hybrid_neo4j.error %}
+                                {{ ((parallel_results.results.hybrid_neo4j.time / min_time * 100) | round(0)) }}%
+                            {% else %}
+                                N/A
+                            {% endif %}
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+        </div>
+    </div>
+</div>
+
+{% elif in_progress %}
 <!-- Query Progress Display -->
 <div id="query-progress" class="card mt-4">
     <div class="card-header">
@@ -103,20 +311,22 @@
         </div>
     </div>
 </div>
+
 {% elif answer %}
+<!-- Single Mode Answer Display -->
 <div class="card mt-4">
     <div class="card-header">
         <h5>Answer</h5>
     </div>
     <div class="card-body">
         <div class="answer-text">
-            {{ answer | nl2br }}
+            {{ answer | replace('\n', '<br>') | safe }}
         </div>
     </div>
 </div>
 {% endif %}
 
-<!-- NEW: Add usage tips -->
+<!-- Usage tips -->
 <div class="mt-4">
     <div class="row">
         <div class="col-md-6">
@@ -154,12 +364,143 @@
 {% endblock %}
 
 {% block scripts %}
+<!-- Chart.js for performance visualization -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+{% if parallel_results %}
+<script>
+// Chart for performance comparison
+document.addEventListener('DOMContentLoaded', function() {
+    const ctx = document.getElementById('performanceChart');
+    if (ctx) {
+        const chart = new Chart(ctx.getContext('2d'), {
+            type: 'bar',
+            data: {
+                labels: ['Normal RAG', 'Graph RAG', 'Hybrid Neo4j'],
+                datasets: [{
+                    label: 'Response Time (seconds)',
+                    data: [
+                        {{ parallel_results.results.normal.time }},
+                        {{ parallel_results.results.graph.time }},
+                        {{ parallel_results.results.hybrid_neo4j.time }}
+                    ],
+                    backgroundColor: [
+                        {% if parallel_results.results.normal.error %}
+                            'rgba(255, 99, 132, 0.5)'
+                        {% else %}
+                            'rgba(54, 162, 235, 0.5)'
+                        {% endif %},
+                        {% if parallel_results.results.graph.error %}
+                            'rgba(255, 99, 132, 0.5)'
+                        {% else %}
+                            'rgba(75, 192, 192, 0.5)'
+                        {% endif %},
+                        {% if parallel_results.results.hybrid_neo4j.error %}
+                            'rgba(255, 99, 132, 0.5)'
+                        {% else %}
+                            'rgba(255, 206, 86, 0.5)'
+                        {% endif %}
+                    ],
+                    borderColor: [
+                        {% if parallel_results.results.normal.error %}
+                            'rgba(255, 99, 132, 1)'
+                        {% else %}
+                            'rgba(54, 162, 235, 1)'
+                        {% endif %},
+                        {% if parallel_results.results.graph.error %}
+                            'rgba(255, 99, 132, 1)'
+                        {% else %}
+                            'rgba(75, 192, 192, 1)'
+                        {% endif %},
+                        {% if parallel_results.results.hybrid_neo4j.error %}
+                            'rgba(255, 99, 132, 1)'
+                        {% else %}
+                            'rgba(255, 206, 86, 1)'
+                        {% endif %}
+                    ],
+                    borderWidth: 2
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        title: {
+                            display: true,
+                            text: 'Time (seconds)'
+                        },
+                        ticks: {
+                            callback: function(value) {
+                                return value + 's';
+                            }
+                        }
+                    },
+                    x: {
+                        ticks: {
+                            autoSkip: false,
+                            maxRotation: 0,
+                            minRotation: 0
+                        }
+                    }
+                },
+                plugins: {
+                    legend: {
+                        display: false
+                    },
+                    title: {
+                        display: true,
+                        text: 'Query Processing Time by Mode',
+                        font: {
+                            size: 14
+                        }
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                let label = context.dataset.label || '';
+                                if (label) {
+                                    label += ': ';
+                                }
+                                label += context.parsed.y + 's';
+                                
+                                // Add error message if there's an error
+                                const mode = context.label.toLowerCase().replace(' ', '_');
+                                {% if parallel_results.results.normal.error %}
+                                    if (context.label === 'Normal RAG') {
+                                        label += ' (Error: {{ parallel_results.results.normal.error }})';
+                                    }
+                                {% endif %}
+                                {% if parallel_results.results.graph.error %}
+                                    if (context.label === 'Graph RAG') {
+                                        label += ' (Error: {{ parallel_results.results.graph.error }})';
+                                    }
+                                {% endif %}
+                                {% if parallel_results.results.hybrid_neo4j.error %}
+                                    if (context.label === 'Hybrid Neo4j') {
+                                        label += ' (Error: {{ parallel_results.results.hybrid_neo4j.error }})';
+                                    }
+                                {% endif %}
+                                
+                                return label;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+});
+</script>
+{% endif %}
+
 {% if in_progress %}
 <script>
     // Poll for query progress
     let queryPollInterval;
     let queryCompleted = false;
-    
+    const isParallelMode = {{ 'true' if parallel_mode else 'false' }};
+
     function updateQueryProgress() {
         fetch('/api/progress/query')
             .then(response => {
@@ -193,7 +534,9 @@
     }
     
     function fetchQueryResult() {
-        fetch('/api/query/result')
+        const endpoint = isParallelMode ? '/api/query/parallel-result' : '/api/query/result';
+        
+        fetch(endpoint)
             .then(response => {
                 if (!response.ok) {
                     throw new Error('Query result not available yet');
@@ -201,7 +544,21 @@
                 return response.json();
             })
             .then(data => {
-                completeQueryProcess(data.result);
+                console.log('Received data:', data); // Debug log
+                
+                if (data.error) {
+                    showQueryError(data.error);
+                    return;
+                }
+                
+                if (isParallelMode && data.result) {
+                    completeParallelQueryProcess(data.result);
+                } else if (!isParallelMode && data.result) {
+                    completeQueryProcess(data.result);
+                } else {
+                    // Retry if no result yet
+                    setTimeout(fetchQueryResult, 1000);
+                }
             })
             .catch(error => {
                 console.error('Error fetching query result:', error);
@@ -211,6 +568,18 @@
             });
     }
     
+    function completeParallelQueryProcess(parallelResults) {
+        if (!queryCompleted) {
+            queryCompleted = true;
+            clearInterval(queryPollInterval);
+            
+            // Hide progress elements
+            document.getElementById('query-progress').style.display = 'none';
+            
+            // Show parallel results
+            showParallelResults(parallelResults);
+        }
+    }
     function completeQueryProcess(result) {
         if (!queryCompleted) {
             queryCompleted = true;
@@ -228,6 +597,263 @@
             answerText.innerHTML = result.replace(/\n/g, '<br>');
         }
     }
+    function showParallelResults(parallelResults) {
+        // Create parallel results HTML dynamically
+        const container = document.getElementById('answer-container');
+        container.style.display = 'block';
+        
+        const html = `
+            <div class="card mt-4">
+                <div class="card-header bg-info text-white">
+                    <h5 class="mb-0">🚀 Parallel Mode Results</h5>
+                </div>
+                <div class="card-body">
+                    <!-- Performance Analytics -->
+                    <div class="alert alert-light border mb-4">
+                        <h6 class="alert-heading">Performance Analytics</h6>
+                        <div class="row">
+                            <div class="col-md-3">
+                                <strong>Fastest Mode:</strong>
+                                <span class="badge bg-success">${parallelResults.analytics.fastest_mode || 'N/A'}</span>
+                            </div>
+                            <div class="col-md-3">
+                                <strong>Total Time:</strong>
+                                <span class="badge bg-primary">${parallelResults.analytics.total_time}s</span>
+                            </div>
+                            <div class="col-md-3">
+                                <strong>Average Time:</strong>
+                                <span class="badge bg-secondary">${parallelResults.analytics.average_time.toFixed(2)}s</span>
+                            </div>
+                            <div class="col-md-3">
+                                <strong>Successful:</strong>
+                                <span class="badge bg-info">${parallelResults.analytics.successful_modes}/3</span>
+                            </div>
+                        </div>
+                    </div>
+    
+                    <!-- Results Tabs -->
+                    <ul class="nav nav-tabs" id="parallelResultsTabs" role="tablist">
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link active" id="normal-tab" data-bs-toggle="tab" data-bs-target="#normal-result" type="button" role="tab">
+                                Normal RAG
+                                <span class="badge bg-secondary ms-1">${parallelResults.results.normal.time}s</span>
+                            </button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="graph-tab" data-bs-toggle="tab" data-bs-target="#graph-result" type="button" role="tab">
+                                Graph RAG
+                                <span class="badge bg-secondary ms-1">${parallelResults.results.graph.time}s</span>
+                            </button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="hybrid-tab" data-bs-toggle="tab" data-bs-target="#hybrid-result" type="button" role="tab">
+                                Hybrid Neo4j
+                                <span class="badge bg-secondary ms-1">${parallelResults.results.hybrid_neo4j.time}s</span>
+                            </button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="comparison-tab" data-bs-toggle="tab" data-bs-target="#comparison-view" type="button" role="tab">
+                                📊 Comparison
+                            </button>
+                        </li>
+                    </ul>
+    
+                    <div class="tab-content mt-3" id="parallelResultsContent">
+                        ${generateResultTab('normal', parallelResults.results.normal, 'show active')}
+                        ${generateResultTab('graph', parallelResults.results.graph, '')}
+                        ${generateResultTab('hybrid_neo4j', parallelResults.results.hybrid_neo4j, '')}
+                        ${generateComparisonTab(parallelResults)}
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        container.innerHTML = html;
+        
+        // Recreate the performance chart
+        createPerformanceChart(parallelResults);
+    }
+
+    function createPerformanceChart(parallelResults) {
+        // Wait for DOM to be ready
+        setTimeout(() => {
+            const ctx = document.getElementById('dynamicPerformanceChart');
+            if (ctx) {
+                new Chart(ctx.getContext('2d'), {
+                    type: 'bar',
+                    data: {
+                        labels: ['Normal RAG', 'Graph RAG', 'Hybrid Neo4j'],
+                        datasets: [{
+                            label: 'Response Time (seconds)',
+                            data: [
+                                parallelResults.results.normal.time,
+                                parallelResults.results.graph.time,
+                                parallelResults.results.hybrid_neo4j.time
+                            ],
+                            backgroundColor: [
+                                parallelResults.results.normal.error ? 'rgba(255, 99, 132, 0.5)' : 'rgba(54, 162, 235, 0.5)',
+                                parallelResults.results.graph.error ? 'rgba(255, 99, 132, 0.5)' : 'rgba(75, 192, 192, 0.5)',
+                                parallelResults.results.hybrid_neo4j.error ? 'rgba(255, 99, 132, 0.5)' : 'rgba(255, 206, 86, 0.5)'
+                            ],
+                            borderColor: [
+                                parallelResults.results.normal.error ? 'rgba(255, 99, 132, 1)' : 'rgba(54, 162, 235, 1)',
+                                parallelResults.results.graph.error ? 'rgba(255, 99, 132, 1)' : 'rgba(75, 192, 192, 1)',
+                                parallelResults.results.hybrid_neo4j.error ? 'rgba(255, 99, 132, 1)' : 'rgba(255, 206, 86, 1)'
+                            ],
+                            borderWidth: 2
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                title: { display: true, text: 'Time (seconds)' }
+                            }
+                        },
+                        plugins: {
+                            legend: { display: false },
+                            title: { display: true, text: 'Query Processing Time by Mode' }
+                        }
+                    }
+                });
+            }
+        }, 100);
+    }
+
+
+    function generateComparisonTab(parallelResults) {
+        const minTime = Math.min(
+            parallelResults.results.normal.time || Infinity,
+            parallelResults.results.graph.time || Infinity,
+            parallelResults.results.hybrid_neo4j.time || Infinity
+        );
+        
+        return `
+            <div class="tab-pane fade" id="comparison-view" role="tabpanel">
+                <div class="row">
+                    <div class="col-12">
+                        <h6>Performance Comparison</h6>
+                        <div style="position: relative; height: 300px; width: 100%; max-width: 600px; margin: 0 auto;">
+                            <canvas id="dynamicPerformanceChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Performance Table -->
+                <div class="row mt-4">
+                    <div class="col-12">
+                        <h6>Detailed Performance Metrics</h6>
+                        <table class="table table-sm table-hover">
+                            <thead>
+                                <tr>
+                                    <th>Mode</th>
+                                    <th>Time (s)</th>
+                                    <th>Status</th>
+                                    <th>Relative Speed</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td><strong>Normal RAG</strong></td>
+                                    <td>${parallelResults.results.normal.time}s</td>
+                                    <td>
+                                        ${parallelResults.results.normal.error 
+                                            ? '<span class="badge bg-danger">Error</span>'
+                                            : '<span class="badge bg-success">Success</span>'}
+                                    </td>
+                                    <td>
+                                        ${parallelResults.results.normal.time > 0 && !parallelResults.results.normal.error
+                                            ? Math.round((parallelResults.results.normal.time / minTime * 100)) + '%'
+                                            : 'N/A'}
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Graph RAG</strong></td>
+                                    <td>${parallelResults.results.graph.time}s</td>
+                                    <td>
+                                        ${parallelResults.results.graph.error 
+                                            ? '<span class="badge bg-danger">Error</span>'
+                                            : '<span class="badge bg-success">Success</span>'}
+                                    </td>
+                                    <td>
+                                        ${parallelResults.results.graph.time > 0 && !parallelResults.results.graph.error
+                                            ? Math.round((parallelResults.results.graph.time / minTime * 100)) + '%'
+                                            : 'N/A'}
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Hybrid Neo4j</strong></td>
+                                    <td>${parallelResults.results.hybrid_neo4j.time}s</td>
+                                    <td>
+                                        ${parallelResults.results.hybrid_neo4j.error 
+                                            ? '<span class="badge bg-danger">Error</span>'
+                                            : '<span class="badge bg-success">Success</span>'}
+                                    </td>
+                                    <td>
+                                        ${parallelResults.results.hybrid_neo4j.time > 0 && !parallelResults.results.hybrid_neo4j.error
+                                            ? Math.round((parallelResults.results.hybrid_neo4j.time / minTime * 100)) + '%'
+                                            : 'N/A'}
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+    
+
+    function generateResultTab(mode, result, activeClass) {
+        const modeNames = {
+            'normal': 'Normal RAG',
+            'graph': 'Graph RAG', 
+            'hybrid_neo4j': 'Hybrid Neo4j'
+        };
+        
+        // FIX: Map mode to correct tab ID
+        const tabIdMap = {
+            'normal': 'normal-result',
+            'graph': 'graph-result',
+            'hybrid_neo4j': 'hybrid-result'  // Changed from hybrid_neo4j-result to hybrid-result
+        };
+        
+        const tabId = tabIdMap[mode] || `${mode}-result`;
+        
+        if (result.error) {
+            return `
+                <div class="tab-pane fade ${activeClass}" id="${tabId}" role="tabpanel">
+                    <div class="result-container">
+                        <div class="alert alert-danger">
+                            <strong>Error:</strong> ${result.error}
+                        </div>
+                    </div>
+                </div>
+            `;
+        } else if (result.answer) {
+            return `
+                <div class="tab-pane fade ${activeClass}" id="${tabId}" role="tabpanel">
+                    <div class="result-container">
+                        <div class="answer-text">
+                            ${result.answer.replace(/\n/g, '<br>')}
+                        </div>
+                    </div>
+                </div>
+            `;
+        } else {
+            return `
+                <div class="tab-pane fade ${activeClass}" id="${tabId}" role="tabpanel">
+                    <div class="result-container">
+                        <div class="alert alert-warning">No result available</div>
+                    </div>
+                </div>
+            `;
+        }
+    }
+
+
     
     function showQueryError(message) {
         if (!queryCompleted) {
@@ -270,7 +896,7 @@
 {% endif %}
 
 <script>
-    // NEW: Automatically use async mode for long questions or Graph RAG
+    // Automatically use async mode for long questions or Graph RAG
     document.addEventListener('DOMContentLoaded', function() {
         const questionInput = document.getElementById('question');
         const asyncInput = document.getElementById('async-input');

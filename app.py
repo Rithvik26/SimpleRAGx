@@ -16,6 +16,11 @@ from werkzeug.utils import secure_filename
 from simple_rag import EnhancedSimpleRAG
 from config import get_config_manager
 from extensions import ProgressTracker
+import time
+import concurrent.futures
+from typing import Dict, Any
+
+parallel_query_results = {}
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
@@ -143,6 +148,140 @@ def process_query_background(question, session_id=None):
                 progress_tracker.update(100, 100, status="error", 
                                       message=f"Query error: {str(e)}")
 
+def process_parallel_queries(question: str, session_id: str) -> Dict[str, Any]:
+    """Process queries in all three modes simultaneously with progress tracking."""
+    global simplerag_instance
+    import threading
+    
+    progress_tracker = ProgressTracker.get_tracker(session_id, "query")
+    
+    results = {
+        'normal': {'answer': None, 'time': 0, 'error': None},
+        'graph': {'answer': None, 'time': 0, 'error': None},
+        'hybrid_neo4j': {'answer': None, 'time': 0, 'error': None}
+    }
+    
+    if progress_tracker:
+        progress_tracker.update(20, 100, status="processing", 
+                               message="Starting parallel execution in 3 modes")
+    
+    # Create a lock for thread-safe mode switching
+    mode_lock = threading.Lock()
+    completed_modes = {'count': 0}
+    
+    def run_query_mode(mode: str) -> tuple:
+        """Run query in a specific mode and measure time."""
+        start_time = time.time()
+        try:
+            with mode_lock:
+                # Save original mode
+                original_mode = simplerag_instance.rag_mode
+                
+                # Check availability for special modes BEFORE setting mode
+                if mode == 'hybrid_neo4j':
+                    if not simplerag_instance.is_graph_ready():
+                        elapsed_time = time.time() - start_time
+                        return (mode, None, elapsed_time, "Graph RAG not available for hybrid mode")
+                    if not simplerag_instance.is_neo4j_ready():
+                        elapsed_time = time.time() - start_time
+                        return (mode, None, elapsed_time, "Neo4j not available for hybrid mode")
+                elif mode == 'graph':
+                    if not simplerag_instance.is_graph_ready():
+                        elapsed_time = time.time() - start_time
+                        return (mode, None, elapsed_time, "Graph RAG not initialized")
+                
+                # Set mode temporarily
+                simplerag_instance.set_rag_mode(mode)
+            
+            # Run query (outside lock to allow parallel execution)
+            # FIXED: Just use the standard query method for all modes
+            answer = simplerag_instance.query(question, f"{session_id}_{mode}")
+            
+            with mode_lock:
+                # Restore original mode
+                simplerag_instance.set_rag_mode(original_mode)
+                
+                # Update progress
+                completed_modes['count'] += 1
+                if progress_tracker:
+                    progress = 20 + (completed_modes['count'] * 20)  # 20-80%
+                    progress_tracker.update(progress, 100, status="processing", 
+                                        message=f"Completed {mode} mode ({completed_modes['count']}/3)")
+        
+            elapsed_time = time.time() - start_time
+            return (mode, answer, elapsed_time, None)
+            
+        except Exception as e:
+            with mode_lock:
+                # Restore original mode on error
+                try:
+                    simplerag_instance.set_rag_mode(original_mode)
+                except:
+                    pass
+                    
+                completed_modes['count'] += 1
+                if progress_tracker:
+                    progress = 20 + (completed_modes['count'] * 20)
+                    progress_tracker.update(progress, 100, status="processing", 
+                                        message=f"Error in {mode} mode ({completed_modes['count']}/3)")
+                    
+            elapsed_time = time.time() - start_time
+            logger.error(f"Error in {mode} mode: {e}")
+            return (mode, None, elapsed_time, str(e))
+    
+    # DELETE the run_hybrid_query function entirely - it's not needed
+    
+    # Run all modes in parallel
+    threads = []
+    mode_results = {}
+    
+    def thread_worker(mode):
+        """Worker function for thread that properly stores results."""
+        result = run_query_mode(mode)
+        # Store the result in the shared dictionary
+        mode_results[mode] = result
+        return result
+    
+    # Create and start threads with the fixed worker function
+    for mode in ['normal', 'graph', 'hybrid_neo4j']:
+        thread = threading.Thread(target=thread_worker, args=(mode,))
+        threads.append(thread)
+        thread.start()
+    
+    # Wait for all threads to complete
+    for thread in threads:
+        thread.join()
+    
+    # Process results
+    for mode in ['normal', 'graph', 'hybrid_neo4j']:
+        if mode in mode_results:
+            mode_name, answer, elapsed_time, error = mode_results[mode]
+            results[mode]['answer'] = answer
+            results[mode]['time'] = round(elapsed_time, 2)
+            results[mode]['error'] = error
+        else:
+            results[mode]['error'] = "Thread execution failed"
+    
+    # Calculate analytics
+    successful_modes = [mode for mode in results if not results[mode]['error']]
+    fastest_mode = min(successful_modes, key=lambda m: results[m]['time']) if successful_modes else None
+    
+    analytics = {
+        'total_modes': 3,
+        'successful_modes': len(successful_modes),
+        'failed_modes': 3 - len(successful_modes),
+        'fastest_mode': fastest_mode,
+        'total_time': max(results[mode]['time'] for mode in results),
+        'average_time': sum(results[mode]['time'] for mode in results if not results[mode]['error']) / len(successful_modes) if successful_modes else 0
+    }
+    
+    return {
+        'question': question,
+        'results': results,
+        'analytics': analytics,
+        'timestamp': time.time()
+    }
+    
 @app.route('/')
 def home():
     """Render home page with current configuration status."""
@@ -422,13 +561,15 @@ def get_progress(operation_type):
     
     return jsonify(tracker.get_info())
 
+
 @app.route('/query', methods=['GET', 'POST'])
 def query():
-    """Handle document querying with RAG mode selection."""
+    """Handle document querying with RAG mode selection including parallel mode."""
     config_manager = get_config_manager()
     answer = None
     question = None
     in_progress = False
+    parallel_results = None
     
     if request.method == 'POST':
         question = request.form.get('question', '').strip()
@@ -443,7 +584,42 @@ def query():
             flash('Please configure your API keys first.', 'danger')
             return redirect(url_for('setup'))
         
-        # Switch RAG mode if specified
+        session_id = session.get('session_id')
+        
+        
+        # Handle parallel mode
+        if query_rag_mode == 'parallel':
+            try:
+                logger.info("Starting parallel query processing")
+                
+                # Initialize progress tracker for parallel mode
+                progress_tracker = ProgressTracker(session_id, "query")
+                progress_tracker.update(0, 100, status="starting", 
+                                    message="Initializing parallel processing for all RAG modes")
+                
+                # Start async parallel processing
+                parallel_thread = threading.Thread(
+                    target=process_parallel_queries_async,
+                    args=(question, session_id),
+                    daemon=True
+                )
+                parallel_thread.start()
+                
+                # Return template with progress tracking enabled
+                return render_template('query.html', 
+                                    question=question, 
+                                    in_progress=True,  # Enable progress tracking
+                                    parallel_mode=True,  # Flag for parallel mode
+                                    config=config_manager.get_all())
+                                    
+            except Exception as e:
+                logger.error(f"Error in parallel processing: {e}")
+                flash(f"Error processing parallel query: {e}", 'danger')
+                return render_template('query.html', 
+                                    question=question,
+                                    config=config_manager.get_all())
+                
+        # Original single-mode processing logic
         if query_rag_mode and query_rag_mode in ['normal', 'graph', 'hybrid_neo4j']:
             current_mode = simplerag_instance.rag_mode
             
@@ -467,7 +643,6 @@ def query():
                     logger.error(f"Error changing RAG mode: {e}")
                     flash(f"Error changing RAG mode: {e}", 'warning')
         
-        session_id = session.get('session_id')
         progress_tracker = ProgressTracker(session_id, "query")
         progress_tracker.update(0, 100, status="starting", 
                                message="Processing your question")
@@ -475,7 +650,6 @@ def query():
         # Determine async processing
         current_mode = simplerag_instance.rag_mode
         use_async = True
-
         
         if use_async:
             in_progress = True
@@ -504,7 +678,66 @@ def query():
                           question=question, 
                           answer=answer, 
                           in_progress=in_progress,
+                          parallel_results=parallel_results,
                           config=config_manager.get_all())
+
+def process_parallel_queries_async(question: str, session_id: str):
+    """Async wrapper for parallel queries with progress tracking."""
+    global parallel_query_results
+    try:
+        progress_tracker = ProgressTracker.get_tracker(session_id, "query")
+        if progress_tracker:
+            progress_tracker.update(10, 100, status="processing", 
+                                   message="Running queries in parallel across all modes")
+        
+        # Run the actual parallel processing
+        parallel_results = process_parallel_queries(question, session_id)
+        
+        if progress_tracker:
+            progress_tracker.update(90, 100, status="finalizing", 
+                                   message="Compiling results from all modes")
+        
+        # Store results in global dictionary
+        parallel_query_results[session_id] = parallel_results
+        
+        if progress_tracker:
+            progress_tracker.update(100, 100, status="complete", 
+                                   message="Parallel processing complete")
+        
+        logger.info(f"Parallel query completed for session {session_id}")
+        
+    except Exception as e:
+        logger.error(f"Error in async parallel processing: {e}")
+        progress_tracker = ProgressTracker.get_tracker(session_id, "query")
+        if progress_tracker:
+            progress_tracker.update(100, 100, status="error", 
+                                   message=f"Parallel processing error: {str(e)}")
+        # Store error in results
+        parallel_query_results[session_id] = {
+            'error': str(e),
+            'results': {
+                'normal': {'answer': None, 'time': 0, 'error': str(e)},
+                'graph': {'answer': None, 'time': 0, 'error': str(e)},
+                'hybrid_neo4j': {'answer': None, 'time': 0, 'error': str(e)}
+            }
+        }
+
+@app.route('/api/query/parallel-result')
+def get_parallel_query_result():
+    """API endpoint to get the result of parallel query processing."""
+    global parallel_query_results
+    session_id = session.get('session_id')
+    if not session_id:
+        return jsonify({"error": "No session found"}), 404
+    
+    result = parallel_query_results.get(session_id)
+    
+    if result:
+        # Remove from storage after retrieval
+        del parallel_query_results[session_id]
+        return jsonify({"result": result})
+    
+    return jsonify({"error": "No result available"}), 404
 
 @app.route('/api/query/result')
 def get_query_result():
