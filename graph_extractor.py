@@ -90,7 +90,7 @@ Return only the JSON, no other text:"""
     @rate_limited(RateLimiter(calls_per_minute=30))
     def _call_gemini_api(self, prompt: str, retry_count: int = 3) -> Dict[str, Any]:
         """Call Gemini API for content generation with retry logic."""
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
         
         headers = {"Content-Type": "application/json"}
         params = {"key": self.api_key}
