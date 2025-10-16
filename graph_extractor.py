@@ -35,14 +35,18 @@ class GraphExtractor:
         import re
         cleaned_text = re.sub(r'\s+', ' ', cleaned_text)
         
+        # CRITICAL FIX: Reduce max length significantly to leave room for output
+        # Gemini 2.5 needs significant token budget for both input AND output
+        max_input_length = 1000  # Reduced from 2000 to ensure output space
+        
         # Truncate if too long
-        if len(cleaned_text) > self.max_chunk_length:
+        if len(cleaned_text) > max_input_length:
             # Try to truncate at sentence boundary
-            sentences = cleaned_text[:self.max_chunk_length].split('. ')
+            sentences = cleaned_text[:max_input_length].split('. ')
             if len(sentences) > 1:
                 cleaned_text = '. '.join(sentences[:-1]) + '.'
             else:
-                cleaned_text = cleaned_text[:self.max_chunk_length]
+                cleaned_text = cleaned_text[:max_input_length]
             
             logger.debug(f"Truncated text from {len(text)} to {len(cleaned_text)} characters")
         
@@ -86,6 +90,7 @@ REQUIRED JSON FORMAT:
 }}
 
 Return only the JSON, no other text:"""
+
     
     @rate_limited(RateLimiter(calls_per_minute=30))
     def _call_gemini_api(self, prompt: str, retry_count: int = 3) -> Dict[str, Any]:
@@ -100,9 +105,10 @@ Return only the JSON, no other text:"""
                 "parts": [{"text": prompt}]
             }],
             "generationConfig": {
-                "temperature": 0.1,  # Low temperature for consistent JSON
-                "maxOutputTokens": 2048,
-                "candidateCount": 1
+                "temperature": 0.1,
+                "maxOutputTokens": 8192,  # INCREASED to maximum for Gemini 2.5 Flash
+                "topP": 0.95,
+                "topK": 40
             },
             "safetySettings": [
                 {
@@ -147,16 +153,59 @@ Return only the JSON, no other text:"""
                 response.raise_for_status()
                 result = response.json()
                 
-                # Extract the generated text
-                if "candidates" in result and len(result["candidates"]) > 0:
-                    candidate = result["candidates"][0]
-                    if "content" in candidate and "parts" in candidate["content"]:
-                        generated_text = candidate["content"]["parts"][0]["text"]
-                        return self._parse_extraction_response(generated_text)
+                # Check for prompt feedback (safety blocks)
+                if "promptFeedback" in result:
+                    block_reason = result.get("promptFeedback", {}).get("blockReason")
+                    if block_reason:
+                        logger.warning(f"Prompt blocked: {block_reason}")
+                        return {"entities": [], "relationships": []}
+                
+                # Check if candidates exist
+                if "candidates" not in result or len(result["candidates"]) == 0:
+                    logger.warning("No candidates in API response")
+                    return {"entities": [], "relationships": []}
+                
+                candidate = result["candidates"][0]
+                
+                # CRITICAL FIX: Handle MAX_TOKENS finish reason
+                finish_reason = candidate.get("finishReason", "")
+                if finish_reason == "MAX_TOKENS":
+                    logger.warning(f"Hit MAX_TOKENS limit on attempt {attempt + 1}")
+                    # If this isn't the last retry, the outer loop will try again
+                    # The empty response will trigger the exception below
+                    if attempt < retry_count - 1:
+                        logger.info("Will retry with same input...")
+                        time.sleep(2)
+                        continue
                     else:
-                        raise ValueError("No content in API response")
-                else:
-                    raise ValueError("No candidates in API response")
+                        logger.error("MAX_TOKENS hit on final attempt, returning empty")
+                        return {"entities": [], "relationships": []}
+                
+                if finish_reason == "SAFETY":
+                    logger.warning("Response blocked by safety filters")
+                    return {"entities": [], "relationships": []}
+                
+                # Extract text from response
+                generated_text = None
+                
+                # Try modern structure: candidate["content"]["parts"][0]["text"]
+                if "content" in candidate:
+                    content = candidate["content"]
+                    
+                    if "parts" in content and len(content["parts"]) > 0:
+                        generated_text = content["parts"][0].get("text", "")
+                    elif "text" in content:
+                        generated_text = content["text"]
+                
+                # Try legacy structure: candidate["text"]
+                if not generated_text and "text" in candidate:
+                    generated_text = candidate["text"]
+                
+                if not generated_text or not generated_text.strip():
+                    raise ValueError(f"Empty text in response (finish_reason: {finish_reason})")
+                
+                logger.debug(f"Successfully extracted {len(generated_text)} characters")
+                return self._parse_extraction_response(generated_text)
                 
             except requests.exceptions.Timeout as e:
                 last_error = f"Timeout on attempt {attempt + 1}: {str(e)}"
@@ -179,7 +228,7 @@ Return only the JSON, no other text:"""
         # All attempts failed
         logger.error(f"Failed to extract entities after {retry_count} attempts. Last error: {last_error}")
         return {"entities": [], "relationships": []}
-    
+
     def _parse_extraction_response(self, response_text: str) -> Dict[str, Any]:
         """Parse the JSON response from Gemini API with robust error handling."""
         try:
