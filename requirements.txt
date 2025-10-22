@@ -11,7 +11,7 @@ gunicorn==21.2.0
 markdown 
 networkx>=3.0
 pathlib2>=2.3.0
-langchain==0.0.340
-langchain-anthropic==0.0.5
-langchain-core==0.0.13
+langchain>=0.1.0,<0.3.0
+langchain-anthropic>=0.1.0
+langchain-core>=0.1.0
 neo4j>=5.0.0
