@@ -7,19 +7,18 @@ import logging
 import json
 from typing import List, Dict, Any, Optional, Callable
 
-
+# Handle different LangChain versions
 try:
-    # Try new import structure (LangChain >= 0.1.0)
-    from langchain.agents import AgentExecutor
-    from langchain.agents import create_react_agent
+    # LangChain >= 0.2.0 - newest structure
+    from langchain.agents import create_react_agent, AgentExecutor
 except ImportError:
     try:
-        # Fallback to legacy structure
-        from langchain.agents import AgentExecutor, create_react_agent
-    except ImportError:
-        # If both fail, try the newest structure
-        from langchain.agents.agent import AgentExecutor
+        # LangChain 0.1.x - intermediate structure  
         from langchain.agents.react.agent import create_react_agent
+        from langchain.agents.agent import AgentExecutor
+    except ImportError:
+        # LangChain < 0.1.0 - legacy structure
+        from langchain.agents import AgentExecutor, create_react_agent
 
 
 from langchain.tools import Tool
