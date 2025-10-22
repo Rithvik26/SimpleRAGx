@@ -6,7 +6,22 @@ FIXED VERSION with better error handling and iteration limits
 import logging
 import json
 from typing import List, Dict, Any, Optional, Callable
-from langchain.agents import AgentExecutor, create_react_agent
+
+
+try:
+    # Try new import structure (LangChain >= 0.1.0)
+    from langchain.agents import AgentExecutor
+    from langchain.agents import create_react_agent
+except ImportError:
+    try:
+        # Fallback to legacy structure
+        from langchain.agents import AgentExecutor, create_react_agent
+    except ImportError:
+        # If both fail, try the newest structure
+        from langchain.agents.agent import AgentExecutor
+        from langchain.agents.react.agent import create_react_agent
+
+
 from langchain.tools import Tool
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.prompts import PromptTemplate
