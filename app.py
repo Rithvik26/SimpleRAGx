@@ -11,7 +11,7 @@ import threading
 import re
 import markdown
 from werkzeug.utils import secure_filename
-
+import uuid
 # Import the modular SimpleRAG components
 from simple_rag import EnhancedSimpleRAG
 from config import get_config_manager
@@ -19,14 +19,23 @@ from extensions import ProgressTracker
 import time
 import concurrent.futures
 from typing import Dict, Any
-
+from datetime import datetime
 parallel_query_results = {}
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 app.config['UPLOAD_FOLDER'] = os.path.join(tempfile.gettempdir(), 'simplerag_uploads')
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max upload size
-
+n8n_config = {
+    "monitoring": False,
+    "folder_link": None,
+    "folder_id": None,
+    "rag_mode": "normal",
+    "poll_interval": 5,
+    "files_indexed": 0,
+    "last_check": None,
+    "recent_files": []
+}
 @app.template_filter('nl2br')
 def nl2br_filter(text):
     """Convert newlines to HTML breaks and process markdown."""
@@ -457,7 +466,133 @@ def get_agentic_tools():
         
     except Exception as e:
         return jsonify({"error": f"Failed to get tools: {str(e)}"}), 500
+
+@app.route('/api/webhook/n8n-binary-upload', methods=['POST'])
+def n8n_binary_upload():
+    """Webhook endpoint for n8n with binary file upload"""
+    try:
+        # Get filename and rag_mode from form data
+        filename = request.form.get('filename', 'document.pdf')
+        rag_mode = request.form.get('rag_mode', 'normal')
+        
+        # Get binary file data
+        if 'data' not in request.files:
+            return jsonify({
+                'success': False,
+                'error': 'No file data received'
+            }), 400
+        
+        file_data = request.files['data']
+        
+        logger.info(f"n8n binary upload triggered for file: {filename}")
+        
+        # Create session and save file
+        session_id = str(uuid.uuid4())
+        safe_filename = secure_filename(filename)
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{session_id}_{safe_filename}")
+        
+        # Save the file
+        file_data.save(file_path)
+        
+        logger.info(f"File saved to: {file_path}")
+        
+        # Validate file
+        validation = simplerag_instance.validate_file(file_path)
+        if not validation['valid']:
+            os.remove(file_path)
+            return jsonify({
+                'success': False,
+                'error': 'File validation failed',
+                'details': validation['errors']
+            }), 400
+        
+        # Set RAG mode
+        if rag_mode in ['normal', 'graph', 'neo4j']:
+            simplerag_instance.set_rag_mode(rag_mode)
+        
+        # Index document
+        result = simplerag_instance.index_document(file_path, safe_filename)
+        
+        return jsonify({
+            'success': True,
+            'filename': safe_filename,
+            'rag_mode': rag_mode,
+            'message': f'Document indexed successfully in {rag_mode} mode',
+            'session_id': session_id
+        })
+        
+    except Exception as e:
+        logger.error(f"n8n binary upload error: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
     
+    
+@app.route('/api/webhook/n8n-upload', methods=['POST'])
+def n8n_webhook_upload():
+    """Webhook endpoint for n8n automation - auto-indexes documents from external sources"""
+    try:
+        data = request.json
+        file_id = data.get('file_id')  # Changed from file_url
+        filename = data.get('filename')
+        rag_mode = data.get('rag_mode', 'normal')
+        
+        logger.info(f"n8n webhook triggered for file: {filename} (ID: {file_id})")
+        
+        # For Google Drive, we need to use the n8n downloaded file
+        # This endpoint now expects n8n to have already downloaded the file
+        # and sent it as base64 or we use Google Drive API
+        
+        # TEMPORARY FIX: Use a direct download URL format
+        # Google Drive direct download format
+        download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+        
+        logger.info(f"Attempting to download from: {download_url}")
+        
+        # Download file from URL
+        import requests
+        response = requests.get(download_url, timeout=30)
+        response.raise_for_status()
+        
+        # Create session and save file
+        session_id = str(uuid.uuid4())
+        safe_filename = secure_filename(filename)
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{session_id}_{safe_filename}")
+        
+        with open(file_path, 'wb') as f:
+            f.write(response.content)
+        
+        logger.info(f"File downloaded to: {file_path}")
+        
+        # Validate file
+        validation = simplerag_instance.validate_file(file_path)
+        if not validation['valid']:
+            os.remove(file_path)
+            return jsonify({
+                'success': False,
+                'error': 'File validation failed',
+                'details': validation['errors']
+            }), 400
+        
+        # Set RAG mode
+        if rag_mode in ['normal', 'graph', 'neo4j']:
+            simplerag_instance.set_rag_mode(rag_mode)
+        
+        # Index document
+        result = simplerag_instance.index_document(file_path, safe_filename)
+        
+        return jsonify({
+            'success': True,  # Changed to True (was 'result')
+            'filename': safe_filename,
+            'rag_mode': rag_mode,
+            'message': f'Document indexed successfully in {rag_mode} mode',
+            'session_id': session_id
+        })
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error downloading file from URL: {e}")
+        return jsonify({'success': False, 'error': f'Failed to download file: {str(e)}'}), 400
+    except Exception as e:
+        logger.error(f"n8n webhook error: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
     
 @app.route('/upload', methods=['GET', 'POST'])
 def upload():
@@ -770,6 +905,96 @@ def advanced():
     
     return render_template('advanced.html', config=config, system_status=system_status)
 
+
+
+#n8n endpoints
+
+@app.route('/n8n-setup')
+def n8n_setup():
+    """n8n automation configuration page"""
+    return render_template('n8n_config.html')
+
+@app.route('/api/n8n/configure', methods=['POST'])
+def configure_n8n():
+    """Configure n8n Google Drive monitoring"""
+    try:
+        data = request.json
+        folder_link = data.get('folder_link')
+        rag_mode = data.get('rag_mode', 'normal')
+        poll_interval = int(data.get('poll_interval', 5))
+        
+        # Extract folder ID from Google Drive link
+        # Format: https://drive.google.com/drive/folders/FOLDER_ID
+        if '/folders/' in folder_link:
+            folder_id = folder_link.split('/folders/')[-1].split('?')[0]
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'Invalid Google Drive folder link. Please use the shareable link format.'
+            }), 400
+        
+        # Update configuration
+        n8n_config.update({
+            "monitoring": True,
+            "folder_link": folder_link,
+            "folder_id": folder_id,
+            "rag_mode": rag_mode,
+            "poll_interval": poll_interval
+        })
+        
+        logger.info(f"n8n configured: Folder {folder_id}, Mode {rag_mode}, Interval {poll_interval}min")
+        
+        return jsonify({
+            'success': True,
+            'folder_id': folder_id,
+            'folder_name': f'Drive folder ({folder_id[:8]}...)',
+            'message': 'n8n monitoring configured successfully'
+        })
+        
+    except Exception as e:
+        logger.error(f"Error configuring n8n: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/n8n/status')
+def n8n_status():
+    """Get current n8n monitoring status"""
+    return jsonify(n8n_config)
+
+@app.route('/api/n8n/stop', methods=['POST'])
+def stop_n8n():
+    """Stop n8n monitoring"""
+    n8n_config["monitoring"] = False
+    logger.info("n8n monitoring stopped")
+    return jsonify({'success': True, 'message': 'Monitoring stopped'})
+
+@app.route('/api/n8n/file-indexed', methods=['POST'])
+def n8n_file_indexed():
+    """Called by n8n when a file is successfully indexed"""
+    try:
+        data = request.json
+        filename = data.get('filename')
+        
+        # Update stats
+        n8n_config["files_indexed"] += 1
+        n8n_config["last_check"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        n8n_config["recent_files"].insert(0, {
+            'name': filename,
+            'time': datetime.now().strftime("%H:%M:%S")
+        })
+        
+        # Keep only last 10 files
+        n8n_config["recent_files"] = n8n_config["recent_files"][:10]
+        
+        logger.info(f"n8n indexed file: {filename}")
+        return jsonify({'success': True})
+        
+    except Exception as e:
+        logger.error(f"Error updating n8n stats: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+
+
 @app.route('/api/system/status')
 def system_status():
     """Enhanced API endpoint for system status information."""
@@ -947,7 +1172,10 @@ def clear_cache():
         })
     except Exception as e:
         return jsonify({"error": f"Failed to clear cache: {str(e)}"}), 500
-
+@app.route('/n8n-test')
+def n8n_test():
+    """Test page for n8n integration"""
+    return render_template('n8n_test.html')
 @app.route('/api/admin/collections/search/<collection_name>')
 def search_collection(collection_name):
     """Search in a specific collection for debugging."""

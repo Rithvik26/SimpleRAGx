@@ -15,3 +15,4 @@ langchain
 langchain-anthropic 
 langchain-core
 neo4j>=5.0.0
+n8n

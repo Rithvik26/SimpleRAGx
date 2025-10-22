@@ -1,0 +1,229 @@
+{% extends "base.html" %}
+
+{% block title %}n8n Automation Setup{% endblock %}
+
+{% block content %}
+<div class="container mt-5">
+    <h2>n8n Google Drive Automation</h2>
+    <p class="text-muted">Configure automated document indexing from Google Drive</p>
+    
+    <div class="row">
+        <div class="col-md-8">
+            <div class="card mb-4">
+                <div class="card-header bg-primary text-white">
+                    <h5>📁 Google Drive Configuration</h5>
+                </div>
+                <div class="card-body">
+                    <form id="driveConfigForm">
+                        <div class="mb-3">
+                            <label class="form-label">Google Drive Folder Link</label>
+                            <input type="text" class="form-control" id="driveFolderLink" 
+                                   placeholder="https://drive.google.com/drive/folders/1ABC...xyz">
+                            <div class="form-text">
+                                Paste the shareable link to your Google Drive folder. 
+                                n8n will monitor this folder for new documents.
+                            </div>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label class="form-label">RAG Mode for Auto-Indexing</label>
+                            <select class="form-control" id="autoRagMode">
+                                <option value="normal">Normal RAG</option>
+                                <option value="graph">Graph RAG (Recommended)</option>
+                                <option value="neo4j">Neo4j Only</option>
+                            </select>
+                            <div class="form-text">
+                                Documents uploaded to this folder will be automatically indexed using this mode.
+                            </div>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label class="form-label">Poll Interval (minutes)</label>
+                            <select class="form-control" id="pollInterval">
+                                <option value="1">Every 1 minute</option>
+                                <option value="5" selected>Every 5 minutes</option>
+                                <option value="15">Every 15 minutes</option>
+                                <option value="60">Every 1 hour</option>
+                            </select>
+                            <div class="form-text">How often n8n checks for new files</div>
+                        </div>
+                        
+                        <button type="submit" class="btn btn-success">
+                            ✓ Save Configuration & Start Monitoring
+                        </button>
+                    </form>
+                    
+                    <div id="configResult" class="mt-3"></div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <div class="card-header">
+                    <h5>📊 Current Monitoring Status</h5>
+                </div>
+                <div class="card-body">
+                    <div id="monitoringStatus">
+                        <div class="alert alert-secondary">
+                            No folder is being monitored yet. Configure above to start.
+                        </div>
+                    </div>
+                    
+                    <button class="btn btn-info" onclick="checkStatus()">
+                        🔄 Refresh Status
+                    </button>
+                    <button class="btn btn-danger" onclick="stopMonitoring()">
+                        ⏹ Stop Monitoring
+                    </button>
+                </div>
+            </div>
+        </div>
+        
+        <div class="col-md-4">
+            <div class="card bg-light">
+                <div class="card-body">
+                    <h5>📖 Setup Instructions</h5>
+                    <ol>
+                        <li>Create a folder in Google Drive</li>
+                        <li>Right-click folder → Share → Copy link</li>
+                        <li>Paste link in the form</li>
+                        <li>Choose RAG mode and interval</li>
+                        <li>Click "Save Configuration"</li>
+                        <li>Upload documents to that folder</li>
+                        <li>They'll be auto-indexed!</li>
+                    </ol>
+                    
+                    <hr>
+                    
+                    <h5>✨ How It Works</h5>
+                    <p class="small">
+                        n8n continuously monitors your Google Drive folder. 
+                        When a new document is uploaded, it automatically:
+                    </p>
+                    <ul class="small">
+                        <li>Downloads the file</li>
+                        <li>Sends it to your RAG system</li>
+                        <li>Indexes it in the selected mode</li>
+                        <li>Makes it searchable immediately</li>
+                    </ul>
+                </div>
+            </div>
+            
+            <div class="card mt-3">
+                <div class="card-body">
+                    <h6>📝 Recent Auto-Indexed Files</h6>
+                    <div id="recentFiles" class="small">
+                        <em class="text-muted">No files indexed yet</em>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Save configuration
+document.getElementById('driveConfigForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    const resultDiv = document.getElementById('configResult');
+    const folderLink = document.getElementById('driveFolderLink').value;
+    const ragMode = document.getElementById('autoRagMode').value;
+    const pollInterval = document.getElementById('pollInterval').value;
+    
+    if (!folderLink) {
+        resultDiv.innerHTML = '<div class="alert alert-danger">Please enter a Google Drive folder link</div>';
+        return;
+    }
+    
+    resultDiv.innerHTML = '<div class="alert alert-info">Configuring n8n workflow...</div>';
+    
+    try {
+        const response = await fetch('/api/n8n/configure', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                folder_link: folderLink,
+                rag_mode: ragMode,
+                poll_interval: pollInterval
+            })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            resultDiv.innerHTML = `
+                <div class="alert alert-success">
+                    <strong>✓ Configuration Saved!</strong><br>
+                    Folder: ${data.folder_name || 'Your folder'}<br>
+                    Mode: ${ragMode}<br>
+                    Interval: Every ${pollInterval} minute(s)<br>
+                    <small>n8n is now monitoring this folder for new documents.</small>
+                </div>`;
+            checkStatus();
+        } else {
+            resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${data.error}</div>`;
+        }
+    } catch (error) {
+        resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${error.message}</div>`;
+    }
+});
+
+// Check monitoring status
+async function checkStatus() {
+    try {
+        const response = await fetch('/api/n8n/status');
+        const data = await response.json();
+        
+        const statusDiv = document.getElementById('monitoringStatus');
+        
+        if (data.monitoring) {
+            statusDiv.innerHTML = `
+                <div class="alert alert-success">
+                    <strong>✓ Active Monitoring</strong><br>
+                    Folder: ${data.folder_link}<br>
+                    RAG Mode: ${data.rag_mode}<br>
+                    Check Interval: Every ${data.poll_interval} minute(s)<br>
+                    Files Indexed: ${data.files_indexed || 0}<br>
+                    Last Check: ${data.last_check || 'Never'}
+                </div>`;
+        } else {
+            statusDiv.innerHTML = `
+                <div class="alert alert-secondary">
+                    No folder is currently being monitored.
+                </div>`;
+        }
+        
+        // Update recent files
+        if (data.recent_files && data.recent_files.length > 0) {
+            const recentDiv = document.getElementById('recentFiles');
+            recentDiv.innerHTML = '<ul class="list-unstyled">' + 
+                data.recent_files.map(f => `<li>✓ ${f.name} <small class="text-muted">(${f.time})</small></li>`).join('') +
+                '</ul>';
+        }
+        
+    } catch (error) {
+        console.error('Error checking status:', error);
+    }
+}
+
+// Stop monitoring
+async function stopMonitoring() {
+    if (!confirm('Stop monitoring the current folder?')) return;
+    
+    try {
+        const response = await fetch('/api/n8n/stop', {method: 'POST'});
+        const data = await response.json();
+        
+        if (data.success) {
+            alert('Monitoring stopped');
+            checkStatus();
+        }
+    } catch (error) {
+        alert('Error: ' + error.message);
+    }
+}
+
+// Check status on page load
+checkStatus();
+</script>
+{% endblock %}
