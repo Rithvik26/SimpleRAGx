@@ -77,7 +77,7 @@ class VectorDBService:
                 
                 # Try alternative connection methods
                 if self._try_alternative_connection():
-                    logger.info("✓ Connected using alternative method")
+                    logger.info("âœ“ Connected using alternative method")
                 else:
                     raise primary_error  # Re-raise if all methods fail
             
@@ -112,7 +112,7 @@ class VectorDBService:
                 self.client.get_collections()
                 self.is_connected = True
                 self.last_error = None
-                logger.info("✓ Connected with SSL verification disabled")
+                logger.info("âœ“ Connected with SSL verification disabled")
                 return True
                 
         except Exception as e:
@@ -140,7 +140,7 @@ class VectorDBService:
                 self.client.get_collections()
                 self.is_connected = True
                 self.last_error = None
-                logger.info("✓ Connected using REST API")
+                logger.info("âœ“ Connected using REST API")
                 return True
                 
         except Exception as e:
@@ -406,20 +406,16 @@ class VectorDBService:
             # Ensure collection exists
             self.ensure_collection_exists(collection_name)
             
-            # Prepare search parameters
-            search_params = {
-                "collection_name": collection_name,
-                "query_vector": query_embedding,
-                "limit": top_k
-            }
-            
-            if filter_condition:
-                search_params["query_filter"] = filter_condition
-            
             logger.debug(f"Searching in collection: {collection_name} with top_k={top_k}")
             
-            # Perform search
-            search_result = self.client.search(**search_params)
+            # Use query_points for qdrant-client >= 1.7 (current standard API)
+            search_result = self.client.query_points(
+                collection_name=collection_name,
+                query=query_embedding,
+                limit=top_k,
+                query_filter=filter_condition,
+                with_payload=True
+            ).points
             
             # Process results
             results = []
