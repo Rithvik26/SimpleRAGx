@@ -547,33 +547,143 @@ class GraphRAGService:
             raise
     
     def search_graph(self, query: str, top_k: int = 10) -> List[Dict[str, Any]]:
-        """Search the knowledge graph using semantic similarity."""
+        """Search the knowledge graph using vector similarity AND NetworkX graph traversal.
+        
+        This is true Graph RAG:
+        1. Vector search finds semantically similar entities/relationships
+        2. NetworkX traversal discovers connected entities (multi-hop reasoning)
+        3. Results are combined and deduplicated
+        """
         if not self.embedding_service or not self.vector_db_service:
             logger.warning("Services not available for graph search")
             return []
         
         try:
-            # Generate query embedding
+            # === STEP 1: Vector similarity search (find seed entities) ===
             query_embedding = self.embedding_service.get_embedding(query)
-            
-            # Search in graph collection
             collection_name = self.config["graph_collection_name"]
             
-            results = self.vector_db_service.search_similar(
+            vector_results = self.vector_db_service.search_similar(
                 query_embedding,
                 top_k=top_k,
                 collection_name=collection_name
             )
             
-            logger.debug(f"Graph search returned {len(results)} results")
-            return results
+            logger.debug(f"Vector search returned {len(vector_results)} results")
+            
+            # === STEP 2: Extract seed entities from vector results ===
+            seed_entities = []
+            for result in vector_results:
+                if result['metadata'].get('type') == 'entity':
+                    entity_name = result['metadata'].get('entity_name')
+                    if entity_name:
+                        seed_entities.append(entity_name)
+            
+            logger.debug(f"Found {len(seed_entities)} seed entities for traversal: {seed_entities[:5]}")
+            
+            # === STEP 3: NetworkX graph traversal from seed entities ===
+            traversal_results = []
+            visited_entities = set()
+            visited_relationships = set()
+            
+            # Only traverse if we have a graph with nodes
+            if self.graph.number_of_nodes() > 0 and seed_entities:
+                # Limit seeds to prevent explosion
+                for seed in seed_entities[:3]:
+                    if seed and seed in self.graph.nodes:
+                        neighborhood = self.get_entity_neighborhood(
+                            seed, 
+                            depth=self.graph_reasoning_depth
+                        )
+                        
+                        # Add discovered entities
+                        for entity in neighborhood['entities']:
+                            entity_name = entity['name']
+                            if entity_name not in visited_entities:
+                                visited_entities.add(entity_name)
+                                
+                                # Calculate score based on distance from seed
+                                distance = entity.get('distance_from_center', 1)
+                                traversal_score = 0.85 - (distance * 0.15)
+                                
+                                traversal_results.append({
+                                    'text': f"Entity: {entity_name} | Type: {entity.get('type', 'UNKNOWN')} | Description: {entity.get('description', '')}",
+                                    'metadata': {
+                                        'type': 'entity',
+                                        'entity_name': entity_name,
+                                        'entity_type': entity.get('type', 'UNKNOWN'),
+                                        'description': entity.get('description', ''),
+                                        'discovery_method': 'graph_traversal',
+                                        'seed_entity': seed,
+                                        'distance_from_seed': distance
+                                    },
+                                    'score': traversal_score
+                                })
+                        
+                        # Add discovered relationships
+                        for rel in neighborhood['relationships']:
+                            rel_key = f"{rel['source']}|{rel['relationship']}|{rel['target']}"
+                            if rel_key not in visited_relationships:
+                                visited_relationships.add(rel_key)
+                                
+                                traversal_results.append({
+                                    'text': f"Relationship: {rel['source']} → {rel['relationship']} → {rel['target']} | Description: {rel.get('description', '')}",
+                                    'metadata': {
+                                        'type': 'relationship',
+                                        'source': rel['source'],
+                                        'target': rel['target'],
+                                        'relationship': rel['relationship'],
+                                        'description': rel.get('description', ''),
+                                        'discovery_method': 'graph_traversal',
+                                        'seed_entity': seed
+                                    },
+                                    'score': 0.75
+                                })
+                
+                logger.debug(f"Graph traversal discovered {len(traversal_results)} additional results")
+            else:
+                logger.debug("NetworkX graph empty or no seed entities - skipping traversal")
+            
+            # === STEP 4: Combine and deduplicate results ===
+            # Track what we've already seen from vector search
+            seen_entities = set()
+            seen_relationships = set()
+            
+            for result in vector_results:
+                if result['metadata'].get('type') == 'entity':
+                    seen_entities.add(result['metadata'].get('entity_name'))
+                elif result['metadata'].get('type') == 'relationship':
+                    rel_key = f"{result['metadata'].get('source')}|{result['metadata'].get('relationship')}|{result['metadata'].get('target')}"
+                    seen_relationships.add(rel_key)
+            
+            # Add traversal results that weren't in vector results
+            unique_traversal_results = []
+            for result in traversal_results:
+                if result['metadata'].get('type') == 'entity':
+                    if result['metadata'].get('entity_name') not in seen_entities:
+                        unique_traversal_results.append(result)
+                elif result['metadata'].get('type') == 'relationship':
+                    rel_key = f"{result['metadata'].get('source')}|{result['metadata'].get('relationship')}|{result['metadata'].get('target')}"
+                    if rel_key not in seen_relationships:
+                        unique_traversal_results.append(result)
+            
+            # Combine: vector results first (higher confidence), then traversal discoveries
+            combined_results = vector_results + unique_traversal_results
+            
+            # Sort by score and limit to top_k
+            combined_results.sort(key=lambda x: x.get('score', 0), reverse=True)
+            final_results = combined_results[:top_k]
+            
+            logger.info(f"Graph search complete: {len(vector_results)} vector + {len(unique_traversal_results)} traversal = {len(final_results)} final results")
+            
+            return final_results
             
         except Exception as e:
             logger.error(f"Error searching graph: {str(e)}")
             return []
     
     def get_entity_neighborhood(self, entity_name: str, depth: int = None) -> Dict[str, Any]:
-        """Get the neighborhood of an entity in the graph."""
+        """Get the neighborhood of an entity in the graph with accurate distance tracking."""
         if depth is None:
             depth = self.graph_reasoning_depth
         
@@ -581,25 +691,27 @@ class GraphRAGService:
             logger.debug(f"Entity not found in graph: {entity_name}")
             return {"entities": [], "relationships": [], "center_entity": entity_name}
         
-        # Get subgraph within specified depth
-        subgraph_nodes = set([entity_name])
+        # Track nodes with their distance from center
+        node_distances = {entity_name: 0}
         current_nodes = {entity_name}
         
-        for level in range(depth):
+        for level in range(1, depth + 1):
             next_nodes = set()
             for node in current_nodes:
                 neighbors = set(self.graph.neighbors(node))
-                next_nodes.update(neighbors)
-            subgraph_nodes.update(next_nodes)
+                for neighbor in neighbors:
+                    if neighbor not in node_distances:
+                        node_distances[neighbor] = level
+                        next_nodes.add(neighbor)
             current_nodes = next_nodes
             
             if not next_nodes:  # No more neighbors to explore
                 break
         
         # Extract subgraph
-        subgraph = self.graph.subgraph(subgraph_nodes)
+        subgraph = self.graph.subgraph(node_distances.keys())
         
-        # Format entities and relationships
+        # Format entities with accurate distance
         entities = []
         for node in subgraph.nodes():
             node_data = self.graph.nodes[node]
@@ -607,8 +719,11 @@ class GraphRAGService:
                 "name": node,
                 "type": node_data.get("type", ""),
                 "description": node_data.get("description", ""),
-                "distance_from_center": 0 if node == entity_name else 1  # Could be improved with actual distance calculation
+                "distance_from_center": node_distances.get(node, 0)
             })
+        
+        # Sort entities by distance (closer first)
+        entities.sort(key=lambda x: x['distance_from_center'])
         
         relationships = []
         for edge in subgraph.edges():
