@@ -32,7 +32,7 @@ DEFAULT_CONFIG = {
     "relationship_extraction_prompt": "extract_relationships",
     "graph_reasoning_depth": 2,
     "entity_similarity_threshold": 0.8,
-    "graph_extraction_timeout": 60,
+    "graph_extraction_timeout": 300,
     "max_chunk_length_for_graph": 1000,
     "enable_agentic_ai": True,
     "agentic_max_iterations": 5,

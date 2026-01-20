@@ -18,7 +18,7 @@ class GraphExtractor:
         self.api_key = config["gemini_api_key"]
         self.max_entities_per_chunk = config.get("max_entities_per_chunk", 20)
         self.max_chunk_length = config.get("max_chunk_length_for_graph", 2000)
-        self.extraction_timeout = config.get("graph_extraction_timeout", 45)
+        self.extraction_timeout = config.get("graph_extraction_timeout", 300)
         self.rate_limiter = RateLimiter(calls_per_minute=config.get("rate_limit", 30))
         
         if not self.api_key:

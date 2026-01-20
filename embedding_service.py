@@ -281,7 +281,7 @@ class EmbeddingService:
         Example:
             texts = ["text1", "text2", "text3", ...]
             embeddings = embedding_service.get_embeddings_batch(texts, max_workers=5)
-            # 10 texts: 2000ms sequential → 400ms parallel (5x faster)
+            # 10 texts: 2000ms sequential â†’ 400ms parallel (5x faster)
         """
         if not texts:
             return []
@@ -322,14 +322,17 @@ class EmbeddingService:
                     embeddings[index] = embedding
                     completed += 1
                 else:
+                    # Use zero vector as fallback for failed embeddings
+                    embeddings[index] = [0.0] * self.embedding_dimension
                     failed += 1
-                    logger.warning(f"Failed to embed text at index {index}: {error}")
+                    logger.warning(f"Failed to embed text at index {index}: {error}, using zero vector")
                 
                 # Update progress tracker
                 if progress_tracker:
                     progress = int((completed + failed) / len(texts) * 100)
-                    progress_tracker.update_message(
-                        f"Embedded {completed}/{len(texts)} texts ({failed} failed)"
+                    progress_tracker.update(
+                        progress, 100,
+                        message=f"Embedded {completed}/{len(texts)} texts ({failed} failed)"
                     )
         
         # Calculate performance metrics
@@ -339,17 +342,15 @@ class EmbeddingService:
         logger.info(f"Batch embedding completed: {completed} success, {failed} failed in {elapsed:.2f}s "
                 f"(avg {avg_time_per_text:.3f}s per text)")
         
-        # Filter out failed embeddings (None values)
-        valid_embeddings = [emb for emb in embeddings if emb is not None]
+        if failed > 0:
+            logger.warning(f"{failed} embeddings failed and were replaced with zero vectors")
         
-        if len(valid_embeddings) < len(texts):
-            logger.warning(f"Some embeddings failed: {len(valid_embeddings)}/{len(texts)} successful")
-        
-        return valid_embeddings
+        # Return all embeddings (including zero vectors for failures)
+        return embeddings
 
 
     # ======================================================================
-    # ✅ METHOD 2: ADD THIS METHOD TO EmbeddingService CLASS  
+    # âœ… METHOD 2: ADD THIS METHOD TO EmbeddingService CLASS  
     # ======================================================================
     def get_embeddings_batch_with_retry(self, texts: List[str], max_workers: int = 5,
                                         max_retries: int = 2,
@@ -442,7 +443,7 @@ class EmbeddingService:
 
 
     # ======================================================================
-    # ✅ METHOD 3: ADD THIS METHOD TO EmbeddingService CLASS
+    # âœ… METHOD 3: ADD THIS METHOD TO EmbeddingService CLASS
     # ======================================================================
     def get_batch_stats(self, results: List[dict[str, any]]) -> dict[str, any]:
         """

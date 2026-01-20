@@ -231,7 +231,7 @@ class LLMService:
         Speed optimization: Fast-path for obviously simple queries.
         """
         
-        # ✅ SPEED OPTIMIZATION: LAZY ANALYSIS WITH FAST PATH
+        # âœ… SPEED OPTIMIZATION: LAZY ANALYSIS WITH FAST PATH
         query_lower = query.lower()
         num_contexts = len(contexts)
         
@@ -350,7 +350,7 @@ ANSWER:"""
                 desc = ctx['metadata'].get('description', '')
                 discovery = ctx['metadata'].get('discovery_method', 'vector_search')
                 
-                entry = f"• {name} ({etype})"
+                entry = f"â€¢ {name} ({etype})"
                 if desc:
                     entry += f" - {desc}"
                 if discovery == 'graph_traversal':
@@ -368,7 +368,7 @@ ANSWER:"""
                 rel = ctx['metadata'].get('relationship', 'related_to')
                 discovery = ctx['metadata'].get('discovery_method', 'vector_search')
                 
-                entry = f"• {source} → {rel} → {target}"
+                entry = f"â€¢ {source} â†’ {rel} â†’ {target}"
                 if discovery == 'graph_traversal':
                     entry += " [via graph traversal]"
                 rel_list.append(entry)
@@ -410,7 +410,7 @@ Complexity Level: {complexity_level}
 
 1. Start with a direct {"1-2 sentence answer" if complexity_level == 'simple' else "comprehensive answer covering all key points"}
 2. If the answer involves relationship chains, show them clearly:
-   Person → works_at → Company → acquired → Target
+   Person â†’ works_at â†’ Company â†’ acquired â†’ Target
 3. Use inline citations (Source: filename.pdf) for document information
 4. Mention when information was "found via graph traversal" - this indicates multi-hop reasoning
 5. {"Structure complex answers with clear sections for relationships, entities, and connections" if complexity_level in ['complex', 'very_complex'] else "Keep the response focused and avoid unnecessary repetition"}
@@ -455,18 +455,19 @@ ANSWER:"""
             # Use faster Haiku model for simple/medium queries (2-3x faster)
             if complexity_level in ['simple', 'medium']:
                 model = "claude-3-haiku-20240307"  # 🚀 FASTER - use for 70% of queries
-                max_tokens = min(max_tokens, 2000)
+                max_tokens = min(max_tokens, 4096)  # Haiku's max output tokens
                 logger.debug(f"Using fast Haiku model for {complexity_level} query")
             elif self.rag_mode == "graph" or complexity_level in ['complex', 'very_complex']:
-                model = "claude-3-5-sonnet-20241022"  # More capable for complex queries
-                max_tokens = max(max_tokens, 3000)  # Ensure minimum for complex queries
-                logger.debug(f"Using Sonnet model for {complexity_level} query")
+                model = "claude-sonnet-4-5-20250929"  # CORRECT: Latest Sonnet 4.5 model
+                max_tokens = min(max_tokens, 8192)  # Sonnet 4.5's max output tokens
+                logger.debug(f"Using Sonnet 4.5 model for {complexity_level} query")
             else:
                 model = "claude-3-haiku-20240307"
+                max_tokens = min(max_tokens, 4096)
             
             logger.debug(f"Using Claude model: {model} with max_tokens: {max_tokens}")
             
-            # ✅ Make API call with optimized parameters
+            # âœ… Make API call with optimized parameters
             response = self.claude_client.messages.create(
                 model=model,
                 max_tokens=max_tokens,
@@ -482,7 +483,7 @@ ANSWER:"""
             
             answer = response.content[0].text
             
-            # ✅ TRUNCATION DETECTION - Check if response hit max_tokens
+            # âœ… TRUNCATION DETECTION - Check if response hit max_tokens
             stop_reason = response.stop_reason
             if stop_reason == "max_tokens":
                 truncation_warning = self._generate_truncation_warning(max_tokens)
@@ -506,10 +507,12 @@ ANSWER:"""
             if "not_found_error" in str(e) and "model" in str(e):
                 logger.error("Model not found - using fallback model")
                 try:
-                    # Fallback to Haiku with same token limit
+                    # Fallback to Haiku with token limit capped at Haiku's max (4096)
+                    fallback_max_tokens = min(max_tokens, 4096)
+                    logger.info(f"Fallback to Haiku with max_tokens: {fallback_max_tokens}")
                     response = self.claude_client.messages.create(
                         model="claude-3-haiku-20240307",
-                        max_tokens=max_tokens,
+                        max_tokens=fallback_max_tokens,
                         temperature=0.1,
                         messages=[
                             {"role": "user", "content": prompt}
@@ -531,13 +534,13 @@ ANSWER:"""
         complexity = self._last_complexity_analysis or {}
         complexity_level = complexity.get('complexity_level', 'unknown')
         
-        warning = f"\n\n---\n⚠️ **Response Truncated**: This is a {complexity_level} query that may require more detail than fits in {max_tokens} tokens."
+        warning = f"\n\n---\nâš ï¸ **Response Truncated**: This is a {complexity_level} query that may require more detail than fits in {max_tokens} tokens."
         
         if complexity_level in ['complex', 'very_complex']:
-            warning += "\n\n💡 **Suggestions:**"
-            warning += "\n• Try breaking your question into smaller parts"
-            warning += "\n• Ask for specific aspects rather than 'list all'"
-            warning += "\n• Request a summary first, then ask for details on specific items"
+            warning += "\n\nðŸ’¡ **Suggestions:**"
+            warning += "\nâ€¢ Try breaking your question into smaller parts"
+            warning += "\nâ€¢ Ask for specific aspects rather than 'list all'"
+            warning += "\nâ€¢ Request a summary first, then ask for details on specific items"
         
         return warning
     
@@ -697,7 +700,7 @@ ANSWER:"""
                 desc = ctx['metadata'].get('description', '')
                 discovery = ctx['metadata'].get('discovery_method', 'vector_search')
                 
-                entry = f"• {name} ({etype})"
+                entry = f"â€¢ {name} ({etype})"
                 if desc:
                     entry += f" - {desc}"
                 if discovery == 'graph_traversal':
@@ -715,7 +718,7 @@ ANSWER:"""
                 rel = ctx['metadata'].get('relationship', 'related_to')
                 discovery = ctx['metadata'].get('discovery_method', 'vector_search')
                 
-                entry = f"• {source} → {rel} → {target}"
+                entry = f"â€¢ {source} â†’ {rel} â†’ {target}"
                 if discovery == 'graph_traversal':
                     entry += " [via graph traversal]"
                 rel_list.append(entry)
@@ -773,7 +776,7 @@ Expected Response Type: {response_type}
 Complexity Level: {complexity_level}
 
 1. Start with a direct {"1-2 sentence answer" if complexity_level == 'simple' else "comprehensive answer"}
-2. Show relationship chains when relevant: Entity → relationship → Entity → relationship → Entity
+2. Show relationship chains when relevant: Entity â†’ relationship â†’ Entity â†’ relationship â†’ Entity
 3. Prioritize Neo4j results for structured relationship queries (they come from direct graph database queries)
 4. Use inline citations: (Source: filename.pdf) for documents, (Neo4j) for database results
 5. Note when connections were "found via graph traversal" - this indicates multi-hop reasoning
