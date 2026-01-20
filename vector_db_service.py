@@ -77,7 +77,7 @@ class VectorDBService:
                 
                 # Try alternative connection methods
                 if self._try_alternative_connection():
-                    logger.info("âœ“ Connected using alternative method")
+                    logger.info("Ã¢Å“â€œ Connected using alternative method")
                 else:
                     raise primary_error  # Re-raise if all methods fail
             
@@ -112,7 +112,7 @@ class VectorDBService:
                 self.client.get_collections()
                 self.is_connected = True
                 self.last_error = None
-                logger.info("âœ“ Connected with SSL verification disabled")
+                logger.info("Ã¢Å“â€œ Connected with SSL verification disabled")
                 return True
                 
         except Exception as e:
@@ -140,7 +140,7 @@ class VectorDBService:
                 self.client.get_collections()
                 self.is_connected = True
                 self.last_error = None
-                logger.info("âœ“ Connected using REST API")
+                logger.info("Ã¢Å“â€œ Connected using REST API")
                 return True
                 
         except Exception as e:
@@ -165,19 +165,33 @@ class VectorDBService:
             raise RuntimeError(error_msg)
     
     def is_available(self) -> bool:
-        """Check if the vector database service is available."""
+        """Check if the vector database service is available with retry logic."""
         if not self.is_connected or not self.client:
             return False
         
-        try:
-            # Quick health check
-            self.client.get_collections()
-            return True
-        except Exception as e:
-            logger.warning(f"Vector DB availability check failed: {str(e)}")
-            self.is_connected = False
-            self.last_error = str(e)
-            return False
+        # Try up to 3 times with increasing timeout
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Quick health check with generous timeout
+                import time
+                if attempt > 0:
+                    wait_time = attempt * 2  # 2s, 4s
+                    logger.info(f"Retrying availability check (attempt {attempt + 1}/{max_retries}) after {wait_time}s")
+                    time.sleep(wait_time)
+                
+                self.client.get_collections()
+                return True
+            except Exception as e:
+                if attempt == max_retries - 1:  # Last attempt
+                    logger.warning(f"Vector DB availability check failed after {max_retries} attempts: {str(e)}")
+                    self.is_connected = False
+                    self.last_error = str(e)
+                    return False
+                else:
+                    logger.debug(f"Availability check attempt {attempt + 1} failed: {str(e)}")
+        
+        return False
     
     def get_status(self) -> Dict[str, Any]:
         """Get detailed status of the vector database service."""

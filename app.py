@@ -71,7 +71,7 @@ def initialize_services():
         simplerag_instance = EnhancedSimpleRAG()
         
         # Remove the is_ready() check - always return True
-        logger.info("✓ SimpleRAG services initialized")
+        logger.info("Ã¢Å“â€œ SimpleRAG services initialized")
         return True
         
     except Exception as e:
@@ -86,7 +86,13 @@ def index_document_background(file_path, session_id=None):
     try:
         if simplerag_instance and simplerag_instance.is_ready():
             logger.info(f"Starting background indexing for: {file_path}")
-            success = simplerag_instance.index_document(file_path, session_id)
+            
+            # Create ProgressTracker object if session_id provided
+            progress_tracker = None
+            if session_id:
+                progress_tracker = ProgressTracker.get_tracker(session_id, "index_document")
+            
+            success = simplerag_instance.index_document(file_path, progress_tracker)
             
             if success:
                 logger.info(f"Successfully indexed: {file_path}")
@@ -597,6 +603,10 @@ def n8n_webhook_upload():
 @app.route('/upload', methods=['GET', 'POST'])
 def upload():
     """Handle document uploads with RAG mode selection."""
+    # Ensure session_id exists
+    if 'session_id' not in session:
+        session['session_id'] = os.urandom(16).hex()
+    
     config_manager = get_config_manager()
     
     if request.method == 'POST':
@@ -686,13 +696,27 @@ def upload_progress():
 @app.route('/api/progress/<operation_type>')
 def get_progress(operation_type):
     """API endpoint to get progress information."""
-    session_id = session.get('session_id')
-    if not session_id:
-        return jsonify({"error": "No session found"}), 404
+    # Ensure session_id exists
+    if 'session_id' not in session:
+        session['session_id'] = os.urandom(16).hex()
+        # Return a default "starting" state instead of 404
+        return jsonify({
+            "percentage": 0,
+            "status": "starting",
+            "message": "Initializing...",
+            "current_file": "Starting..."
+        })
     
+    session_id = session.get('session_id')
     tracker = ProgressTracker.get_tracker(session_id, operation_type)
     if not tracker:
-        return jsonify({"error": "No progress tracker found"}), 404
+        # Return a default state instead of 404 to avoid UI errors
+        return jsonify({
+            "percentage": 0,
+            "status": "starting",
+            "message": "Processing...",
+            "current_file": "Processing..."
+        })
     
     return jsonify(tracker.get_info())
 

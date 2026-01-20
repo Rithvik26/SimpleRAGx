@@ -60,7 +60,7 @@ class EnhancedSimpleRAG:
         try:
             if self.is_ready():  # Only initialize if basic services are ready
                 self.agentic_service = AgenticRAGService(self.config, self)
-                logger.info("✓ Agentic AI service initialized")
+                logger.info("Ã¢Å“â€œ Agentic AI service initialized")
             else:
                 self.agentic_service = None
                 self.initialization_warnings.append("Agentic AI service skipped - basic services not ready")
@@ -80,7 +80,7 @@ class EnhancedSimpleRAG:
         # 1. Document Processor (should always work)
         try:
             self.document_processor = DocumentProcessor(self.config)
-            logger.info("✓ Document processor initialized")
+            logger.info("Ã¢Å“â€œ Document processor initialized")
         except Exception as e:
             error_msg = f"Failed to initialize document processor: {str(e)}"
             logger.error(error_msg)
@@ -91,13 +91,13 @@ class EnhancedSimpleRAG:
             try:
                 self.embedding_service = EmbeddingService(self.config)
                 # Remove the test embedding call that fails without valid key
-                logger.info("✓ Embedding service initialized")
+                logger.info("Ã¢Å“â€œ Embedding service initialized")
             except Exception as e:
                 error_msg = f"Failed to initialize embedding service: {str(e)}"
                 logger.error(error_msg)
                 self.initialization_errors.append(error_msg)
         else:
-            logger.info("⚠ Embedding service skipped - Gemini API key not configured")
+            logger.info("Ã¢Å¡Â  Embedding service skipped - Gemini API key not configured")
         
         # 3. Vector Database Service - MAKE CONDITIONAL AND NON-BLOCKING
         if self.config.get("qdrant_url") and self.config.get("qdrant_api_key"):
@@ -106,9 +106,9 @@ class EnhancedSimpleRAG:
                 
                 # Don't fail if connection doesn't work immediately
                 if self.vector_db_service.is_connected:
-                    logger.info("✓ Vector database service initialized and connected")
+                    logger.info("Ã¢Å“â€œ Vector database service initialized and connected")
                 else:
-                    logger.warning("⚠ Vector database service initialized but not connected")
+                    logger.warning("Ã¢Å¡Â  Vector database service initialized but not connected")
                     self.initialization_warnings.append(f"Vector DB connection issue: {self.vector_db_service.last_error}")
                 
             except Exception as e:
@@ -117,7 +117,7 @@ class EnhancedSimpleRAG:
                 self.initialization_warnings.append(error_msg)  # Change to warning instead of error
                 self.vector_db_service = None
         else:
-            logger.info("⚠ Vector database service skipped - credentials not configured")
+            logger.info("Ã¢Å¡Â  Vector database service skipped - credentials not configured")
         
         # 4. LLM Service
         try:
@@ -132,7 +132,7 @@ class EnhancedSimpleRAG:
                 else:
                     self.initialization_warnings.append("Claude API key not configured")
             
-            logger.info("✓ LLM service initialized")
+            logger.info("Ã¢Å“â€œ LLM service initialized")
         except Exception as e:
             error_msg = f"Failed to initialize LLM service: {str(e)}"
             logger.error(error_msg)
@@ -143,7 +143,7 @@ class EnhancedSimpleRAG:
             if self.embedding_service and self.vector_db_service:
                 self.graph_rag_service = GraphRAGService(self.config)
                 self.graph_rag_service.set_services(self.embedding_service, self.vector_db_service)
-                logger.info("✓ Graph RAG service initialized")
+                logger.info("Ã¢Å“â€œ Graph RAG service initialized")
             else:
                 self.initialization_warnings.append("Graph RAG service skipped - dependencies not available")
         except Exception as e:
@@ -183,14 +183,26 @@ class EnhancedSimpleRAG:
                 logger.info(f"  WARNING: {warning}")
         
         if not self.initialization_errors:
-            logger.info("✓ Enhanced SimpleRAG initialized successfully")
+            logger.info("Ã¢Å“â€œ Enhanced SimpleRAG initialized successfully")
     
     def is_ready(self) -> bool:
-        """Check if SimpleRAG is ready for basic operations."""
-        return (self.embedding_service is not None and 
-                self.vector_db_service is not None and 
-                self.vector_db_service.is_available() and
-                self.document_processor is not None)
+        """Check if SimpleRAG is ready for basic operations with connection retry."""
+        # Check basic service initialization
+        if not (self.embedding_service and self.vector_db_service and self.document_processor):
+            return False
+        
+        # Check vector DB availability - retry connection if needed
+        if not self.vector_db_service.is_available():
+            logger.warning("Vector DB not available, attempting to reconnect...")
+            # Try to reconnect
+            if self.vector_db_service.retry_connection():
+                logger.info("Successfully reconnected to Vector DB")
+                return True
+            else:
+                logger.error("Could not reconnect to Vector DB")
+                return False
+        
+        return True
     
     def is_graph_ready(self) -> bool:
         """Check if Graph RAG functionality is ready."""
@@ -354,10 +366,10 @@ class EnhancedSimpleRAG:
                 progress_tracker.update(30, 100, status="embedding", 
                                     message=f"Generating embeddings for {len(chunks)} chunks (parallel)")
             
-            # ✅ SPEED OPTIMIZATION: Extract all texts for batch processing
+            # Ã¢Å“â€¦ SPEED OPTIMIZATION: Extract all texts for batch processing
             chunk_texts = [chunk['text'] for chunk in chunks]
             
-            # ✅ Process in optimal batch sizes
+            # Ã¢Å“â€¦ Process in optimal batch sizes
             batch_size = 50  # Process 50 chunks at a time
             all_embeddings = []
             
@@ -368,7 +380,7 @@ class EnhancedSimpleRAG:
                 logger.info(f"Processing embedding batch {batch_start//batch_size + 1} "
                         f"({batch_start+1}-{batch_end}/{len(chunk_texts)})")
                 
-                # ✅ Get embeddings in parallel (5x faster than sequential)
+                # Ã¢Å“â€¦ Get embeddings in parallel (5x faster than sequential)
                 batch_embeddings = self.embedding_service.get_embeddings_batch(
                     batch_texts,
                     max_workers=5,  # Parallel API calls
@@ -397,22 +409,23 @@ class EnhancedSimpleRAG:
             if self.rag_mode == "normal":
                 collection_name = self.config.get("collection_name", "documents")
                 
-                # Prepare points for batch insertion
-                points_to_insert = []
-                for i, (chunk, embedding) in enumerate(zip(chunks, all_embeddings)):
-                    chunk_id = f"{os.path.basename(file_path)}_chunk_{i}_{int(time.time())}"
-                    
-                    point = {
-                        "id": chunk_id,
-                        "vector": embedding,
-                        "metadata": chunk['metadata']
-                    }
-                    points_to_insert.append(point)
+                # Prepare documents in the format expected by insert_documents
+                # insert_documents expects: documents (with 'text' and 'metadata') and embeddings separately
+                documents_to_insert = []
+                embeddings_to_insert = []
                 
-                # ✅ Batch insert for better performance
-                self.vector_db_service.upsert_points(
-                    collection_name,
-                    points_to_insert,
+                for i, (chunk, embedding) in enumerate(zip(chunks, all_embeddings)):
+                    documents_to_insert.append({
+                        "text": chunk['text'],
+                        "metadata": chunk['metadata']
+                    })
+                    embeddings_to_insert.append(embedding)
+                
+                # Insert using the correct method
+                self.vector_db_service.insert_documents(
+                    documents=documents_to_insert,
+                    embeddings=embeddings_to_insert,
+                    collection_name=collection_name,
                     progress_tracker=progress_tracker
                 )
                 
@@ -437,28 +450,34 @@ class EnhancedSimpleRAG:
                     progress_tracker.update(75, 100, status="graph_extraction",
                                         message="Extracting entities and relationships")
                 
-                # Store document chunks
+                # Store document chunks using correct format
                 doc_collection = self.config.get("collection_name", "documents")
-                doc_points = []
-                for i, (chunk, embedding) in enumerate(zip(chunks, all_embeddings)):
-                    chunk_id = f"{os.path.basename(file_path)}_chunk_{i}_{int(time.time())}"
-                    doc_points.append({
-                        "id": chunk_id,
-                        "vector": embedding,
+                
+                # Prepare documents and embeddings in the format expected by insert_documents
+                documents_to_insert = []
+                embeddings_to_insert = []
+                
+                for chunk, embedding in zip(chunks, all_embeddings):
+                    documents_to_insert.append({
+                        "text": chunk['text'],
                         "metadata": chunk['metadata']
                     })
+                    embeddings_to_insert.append(embedding)
                 
-                self.vector_db_service.upsert_points(doc_collection, doc_points)
+                self.vector_db_service.insert_documents(
+                    documents=documents_to_insert,
+                    embeddings=embeddings_to_insert,
+                    collection_name=doc_collection,
+                    progress_tracker=progress_tracker
+                )
                 
                 # Extract and store graph data
                 if progress_tracker:
                     progress_tracker.update(85, 100, status="graph_building",
                                         message="Building knowledge graph")
                 
-                graph_result = self.graph_rag_service.index_document_with_graph(
-                    file_path, 
+                graph_result = self.graph_rag_service.process_document_for_graph(
                     chunks,
-                    all_embeddings,  # Pass pre-generated embeddings
                     progress_tracker
                 )
                 
@@ -469,14 +488,18 @@ class EnhancedSimpleRAG:
                 elapsed = time.time() - start_time
                 logger.info(f"Graph RAG indexing completed in {elapsed:.2f}s")
                 
+                # Extract counts from graph_stats
+                graph_stats = graph_result.get("graph_stats", {})
+                
                 return {
                     "success": True,
                     "chunks_indexed": len(chunks),
-                    "entities_extracted": graph_result.get("entities_extracted", 0),
-                    "relationships_extracted": graph_result.get("relationships_extracted", 0),
-                    "collections": [doc_collection, graph_result.get("graph_collection")],
+                    "entities_extracted": graph_stats.get("merged_entities", 0),
+                    "relationships_extracted": graph_stats.get("valid_relationships", 0),
+                    "collections": [doc_collection, self.config.get("graph_collection_name", "graph_entities")],
                     "mode": "graph",
-                    "time_elapsed": round(elapsed, 2)
+                    "time_elapsed": round(elapsed, 2),
+                    "graph_stats": graph_stats
                 }
             
             else:
@@ -829,7 +852,7 @@ class EnhancedSimpleRAG:
                     target = ctx['metadata'].get('target', 'Unknown')
                     rel_type = ctx['metadata'].get('relationship', 'unknown')
                     score = ctx.get('score', 0)
-                    results.append(f"    - {source} → {rel_type} → {target} (Score: {score:.3f})")
+                    results.append(f"    - {source} Ã¢â€ â€™ {rel_type} Ã¢â€ â€™ {target} (Score: {score:.3f})")
         
         return "\n".join(results)
     
@@ -872,14 +895,14 @@ class EnhancedSimpleRAG:
                     username=self.config["neo4j_username"],
                     password=self.config["neo4j_password"]
                 )
-                logger.info("✓ Neo4j service initialized")
+                logger.info("Ã¢Å“â€œ Neo4j service initialized")
             except Exception as e:
                 error_msg = f"Failed to initialize Neo4j service: {str(e)}"
                 logger.error(error_msg)
                 self.initialization_warnings.append(error_msg)
                 self.neo4j_service = None
         else:
-            logger.info("⚠ Neo4j service skipped - credentials not configured or not enabled")
+            logger.info("Ã¢Å¡Â  Neo4j service skipped - credentials not configured or not enabled")
             self.neo4j_service = None
 
     def is_neo4j_ready(self) -> bool:
@@ -1232,7 +1255,7 @@ class EnhancedSimpleRAG:
                     target = ctx['metadata'].get('target', 'Unknown')
                     rel_type = ctx['metadata'].get('relationship', 'unknown')
                     score = ctx.get('score', 0)
-                    results.append(f"    - {source} → {rel_type} → {target} (Score: {score:.3f})")
+                    results.append(f"    - {source} Ã¢â€ â€™ {rel_type} Ã¢â€ â€™ {target} (Score: {score:.3f})")
         
         if neo4j_contexts:
             results.append("\nNEO4J GRAPH DATABASE RESULTS:")

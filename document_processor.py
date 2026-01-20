@@ -35,6 +35,53 @@ class DocumentProcessor:
         path = Path(file_path)
         return path.suffix.lower() in self.supported_extensions
     
+    def process_document(self, file_path: str, 
+                        progress_tracker: Optional[ProgressTracker] = None) -> List[Dict[str, Any]]:
+        """
+        Complete document processing pipeline: extract text and create chunks.
+        
+        This is a convenience method that combines extract_text_from_file() and chunk_text().
+        
+        Args:
+            file_path: Path to the document file
+            progress_tracker: Optional progress tracker for UI updates
+            
+        Returns:
+            List of chunk dictionaries with 'text' and 'metadata' fields
+        """
+        if progress_tracker:
+            progress_tracker.update(0, 100, status="extracting", 
+                                   message="Extracting text from document")
+        
+        # Step 1: Extract text from file
+        text = self.extract_text_from_file(file_path, progress_tracker)
+        
+        if not text or not text.strip():
+            logger.warning(f"No text extracted from {file_path}")
+            return []
+        
+        if progress_tracker:
+            progress_tracker.update(50, 100, status="chunking", 
+                                   message="Creating text chunks")
+        
+        # Step 2: Create metadata for the document
+        filename = Path(file_path).name
+        metadata = {
+            "source": filename,
+            "file_path": file_path,
+            "file_type": Path(file_path).suffix.lower()
+        }
+        
+        # Step 3: Chunk the text
+        chunks = self.chunk_text(text, metadata, progress_tracker)
+        
+        if progress_tracker:
+            progress_tracker.update(100, 100, status="complete", 
+                                   message=f"Created {len(chunks)} chunks")
+        
+        logger.info(f"Processed {filename}: extracted {len(text)} chars, created {len(chunks)} chunks")
+        return chunks
+    
     def extract_text_from_file(self, file_path: str, 
                              progress_tracker: Optional[ProgressTracker] = None) -> str:
         """Extract text from various file formats with comprehensive error handling."""

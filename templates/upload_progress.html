@@ -132,9 +132,9 @@
         setTimeout(function() {
             if (!completed) {
                 clearInterval(pollInterval);
-                completeProcess(false, 'Indexing timed out. The document might be too large or complex.');
+                completeProcess(false, 'Indexing timed out after 30 minutes. The document might be too large or complex.');
             }
-        }, 10 * 60 * 1000);
+        }, 30 * 60 * 1000);
     });
 </script>
 {% endblock %}
