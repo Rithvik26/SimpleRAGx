@@ -404,16 +404,14 @@ QUESTION: {query}
 
 """
         
-        prompt += f"""INSTRUCTIONS:
-Expected Response Type: {response_type}
-Complexity Level: {complexity_level}
-
-1. Start with a direct {"1-2 sentence answer" if complexity_level == 'simple' else "comprehensive answer covering all key points"}
-2. If the answer involves relationship chains, show them clearly:
-   Person â†’ works_at â†’ Company â†’ acquired â†’ Target
-3. Use inline citations (Source: filename.pdf) for document information
-4. Mention when information was "found via graph traversal" - this indicates multi-hop reasoning
-5. {"Structure complex answers with clear sections for relationships, entities, and connections" if complexity_level in ['complex', 'very_complex'] else "Keep the response focused and avoid unnecessary repetition"}
+        prompt += """INSTRUCTIONS:
+1. CRITICAL: Answer ONLY with information explicitly provided in the context above
+2. If the requested information is NOT present, state this in ONE sentence - do NOT speculate
+3. Start with the most direct, factual answer possible
+4. Keep responses concise - answer in 1-3 sentences for simple facts
+5. Use inline citations: (Source: filename.pdf)
+6. Do NOT use phrases like "we can infer", "this suggests", "typically", or "likely"
+7. If showing relationship chains, use format: Person -> works_at -> Company
 
 ANSWER:"""
         
