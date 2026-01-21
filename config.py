@@ -18,7 +18,7 @@ DEFAULT_CONFIG = {
     "qdrant_api_key": "",  # Remove os.environ.get
     "collection_name": "simple_rag_docs",  # Keep default name
     "graph_collection_name": "simple_rag_graph",
-    "embedding_dimension": 768,
+    "embedding_dimension": 768,  # gemini-embedding-001 supports 768, 1536, or 3072 dimensions
     "chunk_size": 1000,
     "chunk_overlap": 200,
     "top_k": 5,
@@ -32,7 +32,7 @@ DEFAULT_CONFIG = {
     "relationship_extraction_prompt": "extract_relationships",
     "graph_reasoning_depth": 2,
     "entity_similarity_threshold": 0.8,
-    "graph_extraction_timeout": 300,
+    "graph_extraction_timeout": 60,
     "max_chunk_length_for_graph": 1000,
     "enable_agentic_ai": True,
     "agentic_max_iterations": 5,
@@ -199,7 +199,7 @@ class ConfigManager:
             "top_k": (1, 50),
             "max_entities_per_chunk": (5, 100),
             "graph_reasoning_depth": (1, 10),
-            "embedding_dimension": (100, 2000)
+            "embedding_dimension": (100, 3072)  # gemini-embedding-001 supports up to 3072
         }
         
         for key, (min_val, max_val) in numeric_validations.items():

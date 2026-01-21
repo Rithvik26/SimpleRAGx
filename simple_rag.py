@@ -60,7 +60,7 @@ class EnhancedSimpleRAG:
         try:
             if self.is_ready():  # Only initialize if basic services are ready
                 self.agentic_service = AgenticRAGService(self.config, self)
-                logger.info("Ã¢Å“â€œ Agentic AI service initialized")
+                logger.info(" Agentic AI service initialized")
             else:
                 self.agentic_service = None
                 self.initialization_warnings.append("Agentic AI service skipped - basic services not ready")
@@ -80,7 +80,7 @@ class EnhancedSimpleRAG:
         # 1. Document Processor (should always work)
         try:
             self.document_processor = DocumentProcessor(self.config)
-            logger.info("Ã¢Å“â€œ Document processor initialized")
+            logger.info(". Document processor initialized")
         except Exception as e:
             error_msg = f"Failed to initialize document processor: {str(e)}"
             logger.error(error_msg)
@@ -91,7 +91,7 @@ class EnhancedSimpleRAG:
             try:
                 self.embedding_service = EmbeddingService(self.config)
                 # Remove the test embedding call that fails without valid key
-                logger.info("Ã¢Å“â€œ Embedding service initialized")
+                logger.info(". Embedding service initialized")
             except Exception as e:
                 error_msg = f"Failed to initialize embedding service: {str(e)}"
                 logger.error(error_msg)
@@ -106,7 +106,7 @@ class EnhancedSimpleRAG:
                 
                 # Don't fail if connection doesn't work immediately
                 if self.vector_db_service.is_connected:
-                    logger.info("Ã¢Å“â€œ Vector database service initialized and connected")
+                    logger.info(". Vector database service initialized and connected")
                 else:
                     logger.warning("Ã¢Å¡Â  Vector database service initialized but not connected")
                     self.initialization_warnings.append(f"Vector DB connection issue: {self.vector_db_service.last_error}")
@@ -132,7 +132,7 @@ class EnhancedSimpleRAG:
                 else:
                     self.initialization_warnings.append("Claude API key not configured")
             
-            logger.info("Ã¢Å“â€œ LLM service initialized")
+            logger.info(". LLM service initialized")
         except Exception as e:
             error_msg = f"Failed to initialize LLM service: {str(e)}"
             logger.error(error_msg)
@@ -143,7 +143,7 @@ class EnhancedSimpleRAG:
             if self.embedding_service and self.vector_db_service:
                 self.graph_rag_service = GraphRAGService(self.config)
                 self.graph_rag_service.set_services(self.embedding_service, self.vector_db_service)
-                logger.info("Ã¢Å“â€œ Graph RAG service initialized")
+                logger.info(". Graph RAG service initialized")
             else:
                 self.initialization_warnings.append("Graph RAG service skipped - dependencies not available")
         except Exception as e:
@@ -183,7 +183,7 @@ class EnhancedSimpleRAG:
                 logger.info(f"  WARNING: {warning}")
         
         if not self.initialization_errors:
-            logger.info("Ã¢Å“â€œ Enhanced SimpleRAG initialized successfully")
+            logger.info(". Enhanced SimpleRAG initialized successfully")
     
     def is_ready(self) -> bool:
         """Check if SimpleRAG is ready for basic operations with connection retry."""
@@ -895,7 +895,7 @@ class EnhancedSimpleRAG:
                     username=self.config["neo4j_username"],
                     password=self.config["neo4j_password"]
                 )
-                logger.info("Ã¢Å“â€œ Neo4j service initialized")
+                logger.info(". Neo4j service initialized")
             except Exception as e:
                 error_msg = f"Failed to initialize Neo4j service: {str(e)}"
                 logger.error(error_msg)
