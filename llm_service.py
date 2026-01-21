@@ -682,7 +682,7 @@ ANSWER:"""
         document_text = ""
         if document_contexts:
             doc_sections = []
-            for ctx in document_contexts[:3]:
+            for ctx in document_contexts[:5]:
                 filename = ctx['metadata'].get('filename', 'Unknown Document')
                 text = ctx['text']
                 doc_sections.append(f"[Source: {filename}]\n{text}")
@@ -692,7 +692,7 @@ ANSWER:"""
         entities_text = ""
         if entity_contexts:
             entity_list = []
-            for ctx in entity_contexts[:5]:
+            for ctx in entity_contexts[:10]:
                 name = ctx['metadata'].get('entity_name', 'Unknown')
                 etype = ctx['metadata'].get('entity_type', 'Unknown')
                 desc = ctx['metadata'].get('description', '')
@@ -710,7 +710,7 @@ ANSWER:"""
         relationships_text = ""
         if relationship_contexts:
             rel_list = []
-            for ctx in relationship_contexts[:5]:
+            for ctx in relationship_contexts[:10]:
                 source = ctx['metadata'].get('source', 'Unknown')
                 target = ctx['metadata'].get('target', 'Unknown')
                 rel = ctx['metadata'].get('relationship', 'related_to')
