@@ -5,7 +5,7 @@ Wraps PageIndexClient with:
   - Atomic workspace writes (no corrupt JSON on killed threads)
   - Exponential-backoff retry around the slow page_index() call
   - Hard cap on pages-per-tool-call to prevent context overflow
-  - Progress tracking compatible with SimpleRAG's ProgressTracker
+  - Progress tracking compatible with SimpleRAGx's ProgressTracker
 """
 
 import os
@@ -32,7 +32,7 @@ MAX_PAGES_PER_CALL = 8
 DEFAULT_MAX_TOOL_ROUNDS = 4
 
 # Workspace lives here unless overridden in config.
-DEFAULT_WORKSPACE = str(Path.home() / ".simplerag" / "pageindex_workspace")
+DEFAULT_WORKSPACE = str(Path.home() / ".simpleragx" / "pageindex_workspace")
 
 # Status values written into _meta.json so crashed indexing can be detected.
 STATUS_INDEXING = "indexing"
@@ -767,7 +767,7 @@ class PageIndexService:
         except ImportError as e:
             raise ImportError(
                 f"pageindex package not found: {e}. "
-                "Make sure the pageindex/ directory is present in the SimpleRAG project root "
+                "Make sure the pageindex/ directory is present in the SimpleRAGx project root "
                 "(it should have been bundled — re-run: "
                 "cp -r /tmp/pageindex_src/pageindex .  after cloning VectifyAI/PageIndex)."
             )
