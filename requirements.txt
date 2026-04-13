@@ -8,10 +8,16 @@ qdrant-client>=1.8.0
 anthropic>=0.8.0
 requests==2.31.0
 gunicorn==21.2.0
-markdown 
+markdown
 networkx>=3.0
 pathlib2>=2.3.0
 langchain>=0.1.0,<0.3.0
 langchain-anthropic>=0.1.0
 langchain-core>=0.1.0
 neo4j>=5.0.0
+# PageIndex — vectorless reasoning-based RAG
+# The pageindex/ directory is bundled directly in this repo (no setup.py upstream).
+# Its runtime deps:
+litellm>=1.40.0
+pymupdf>=1.24.0
+python-dotenv>=1.0.0

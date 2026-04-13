@@ -17,7 +17,8 @@ from document_processor import DocumentProcessor
 from llm_service import LLMService
 from extensions import ProgressTracker
 from agentic_service import AgenticRAGService
-from neo4j_service import Neo4jService  # Add this import
+from neo4j_service import Neo4jService
+from pageindex_service import PageIndexService
 
 logger = logging.getLogger(__name__)
 
@@ -47,14 +48,16 @@ class EnhancedSimpleRAG:
         self.vector_db_service = None
         self.llm_service = None
         self.graph_rag_service = None
-        
+        self.pageindex_service = None
+
         # Track initialization status
         self.initialization_errors = []
         self.initialization_warnings = []
-        
+
         # Initialize all services
         self._initialize_services()
         self._initialize_neo4j_service()
+        self._initialize_pageindex_service()
 
         # 6. Agentic AI Service (after all other services are ready)
         try:
@@ -222,7 +225,8 @@ class EnhancedSimpleRAG:
                 "vector_db_service": self.vector_db_service is not None and self.vector_db_service.is_available(),
                 "llm_service": self.llm_service is not None,
                 "graph_rag_service": self.graph_rag_service is not None,
-                "agentic_service": self.agentic_service is not None  # ADD THIS LINE
+                "agentic_service": self.agentic_service is not None,
+                "pageindex_service": self.is_pageindex_ready(),
             },
             "initialization_errors": self.initialization_errors,
             "initialization_warnings": self.initialization_warnings
@@ -244,39 +248,6 @@ class EnhancedSimpleRAG:
             status["agentic_stats"] = self.agentic_service.get_agentic_stats()
         return status
     
-    def set_rag_mode(self, mode: str):
-        """Switch between 'normal', 'graph', 'neo4j', and 'hybrid_neo4j' RAG modes."""
-        # Update the valid modes list to include hybrid_neo4j
-        if mode not in ["normal", "graph", "neo4j", "hybrid_neo4j"]:
-            raise ValueError("RAG mode must be 'normal', 'graph', 'neo4j', or 'hybrid_neo4j'")
-        
-        if mode == "graph" and not self.is_graph_ready():
-            raise RuntimeError("Graph RAG mode not available - check service initialization")
-        
-        if mode == "neo4j" and not self.is_neo4j_ready():
-            raise RuntimeError("Neo4j mode not available - check Neo4j configuration")
-        
-        # Add check for hybrid_neo4j mode
-        if mode == "hybrid_neo4j":
-            if not self.is_graph_ready():
-                raise RuntimeError("Graph RAG not available for hybrid mode")
-            if not self.is_neo4j_ready():
-                raise RuntimeError("Neo4j not available for hybrid mode")
-        
-        old_mode = self.rag_mode
-        self.rag_mode = mode
-        
-        # Update configuration
-        self.config_manager.set("rag_mode", mode)
-        self.config_manager.save()
-        
-        # Update services
-        if self.document_processor:
-            self.document_processor.rag_mode = mode
-        if self.llm_service:
-            self.llm_service.rag_mode = mode
-        
-        logger.info(f"RAG mode changed from {old_mode} to {mode}")
     
     def validate_file(self, file_path: str) -> Dict[str, Any]:
         """Validate a file for processing."""
@@ -502,9 +473,121 @@ class EnhancedSimpleRAG:
                     "graph_stats": graph_stats
                 }
             
+            # Neo4j-only mode: extract entities into Neo4j (no vector DB needed)
+            elif self.rag_mode == "neo4j":
+                if not self.neo4j_service:
+                    raise RuntimeError("Neo4j service not configured. Check neo4j_uri, neo4j_username, neo4j_password and neo4j_enabled.")
+
+                if progress_tracker:
+                    progress_tracker.update(75, 100, status="graph_extraction",
+                                        message="Extracting entities and relationships for Neo4j")
+
+                all_entities = []
+                all_relationships = []
+                total_chunks = len(chunks)
+
+                for i, chunk in enumerate(chunks):
+                    try:
+                        chunk_id = f"chunk_{i}_{int(time.time())}"
+                        graph_data = self.graph_rag_service.graph_extractor.extract_entities_and_relationships(
+                            chunk["text"], chunk_id
+                        )
+                        for entity in graph_data.get("entities", []):
+                            entity["metadata"] = chunk.get("metadata", {})
+                        for rel in graph_data.get("relationships", []):
+                            rel["metadata"] = chunk.get("metadata", {})
+                        all_entities.extend(graph_data.get("entities", []))
+                        all_relationships.extend(graph_data.get("relationships", []))
+                        if progress_tracker:
+                            p = 75 + int((i + 1) / total_chunks * 15)
+                            progress_tracker.update(p, 100, message=f"Extracted from chunk {i+1}/{total_chunks}")
+                        time.sleep(0.2)
+                    except Exception as e:
+                        logger.error(f"Error processing chunk {i}: {e}")
+                        continue
+
+                merged_entities = self.graph_rag_service._merge_similar_entities(all_entities)
+                validated_rels = self.graph_rag_service._validate_relationships(all_relationships, merged_entities)
+
+                if progress_tracker:
+                    progress_tracker.update(90, 100, status="storing", message="Storing in Neo4j")
+
+                import os as _os
+                file_name = _os.path.basename(file_path)
+                stats = self.neo4j_service.store_entities_and_relationships(
+                    merged_entities, validated_rels, document_name=file_name
+                )
+                self.neo4j_service.create_indexes()
+
+                if progress_tracker:
+                    progress_tracker.update(100, 100, status="complete",
+                                        message=f"Neo4j indexing complete: {stats['entities_created']} entities, {stats['relationships_created']} relationships")
+
+                elapsed = time.time() - start_time
+                return {
+                    "success": True,
+                    "chunks_indexed": len(chunks),
+                    "entities_extracted": stats["entities_created"],
+                    "relationships_extracted": stats["relationships_created"],
+                    "mode": "neo4j",
+                    "time_elapsed": round(elapsed, 2)
+                }
+
+            # Hybrid mode: vector store + graph collection + Neo4j
+            elif self.rag_mode == "hybrid_neo4j":
+                if not self.neo4j_service:
+                    raise RuntimeError("Neo4j service not configured for hybrid mode.")
+
+                if progress_tracker:
+                    progress_tracker.update(70, 100, status="storing",
+                                        message="Storing document chunks in vector DB")
+
+                doc_collection = self.config.get("collection_name", "documents")
+                documents_to_insert = [{"text": c["text"], "metadata": c["metadata"]} for c in chunks]
+                self.vector_db_service.insert_documents(
+                    documents=documents_to_insert,
+                    embeddings=all_embeddings,
+                    collection_name=doc_collection,
+                    progress_tracker=progress_tracker
+                )
+
+                if progress_tracker:
+                    progress_tracker.update(80, 100, status="graph_extraction",
+                                        message="Building knowledge graph and storing in Neo4j")
+
+                graph_result = self.graph_rag_service.process_document_for_graph(chunks, progress_tracker)
+                graph_stats = graph_result.get("graph_stats", {})
+
+                # Also store entities in Neo4j
+                import os as _os
+                file_name = _os.path.basename(file_path)
+                neo4j_stats = self.neo4j_service.store_entities_and_relationships(
+                    graph_result.get("entities", []),
+                    graph_result.get("relationships", []),
+                    document_name=file_name
+                )
+                self.neo4j_service.create_indexes()
+
+                if progress_tracker:
+                    progress_tracker.update(100, 100, status="complete",
+                                        message="Hybrid indexing complete")
+
+                elapsed = time.time() - start_time
+                return {
+                    "success": True,
+                    "chunks_indexed": len(chunks),
+                    "entities_extracted": graph_stats.get("merged_entities", 0),
+                    "relationships_extracted": graph_stats.get("valid_relationships", 0),
+                    "neo4j_entities": neo4j_stats.get("entities_created", 0),
+                    "collections": [doc_collection, self.config.get("graph_collection_name")],
+                    "mode": "hybrid_neo4j",
+                    "time_elapsed": round(elapsed, 2),
+                    "graph_stats": graph_stats
+                }
+
             else:
                 raise ValueError(f"Unknown RAG mode: {self.rag_mode}")
-        
+
         except Exception as e:
             logger.error(f"Error indexing document: {str(e)}")
             if progress_tracker:
@@ -662,8 +745,16 @@ class EnhancedSimpleRAG:
         try:
             logger.info(f"Processing query in {self.rag_mode} mode: {question[:100]}...")
             
-            if self.rag_mode == "graph" and self.is_graph_ready():
+            if self.rag_mode == "pageindex" and self.is_pageindex_ready():
+                result = self.pageindex_service.query(question, progress_tracker=progress_tracker)
+                # Return just the answer string for backward-compat with callers that
+                # expect a plain string.  Callers that want full citations should call
+                # query_pageindex() directly.
+                return result.get("answer", "PageIndex returned no answer.")
+            elif self.rag_mode == "graph" and self.is_graph_ready():
                 return self._query_graph_mode(question, progress_tracker)
+            elif self.rag_mode == "neo4j" and self.is_neo4j_ready():
+                return self.query_neo4j(question, session_id)
             elif self.rag_mode == "hybrid_neo4j" and self.is_graph_ready() and self.is_neo4j_ready():
                 return self._query_hybrid_neo4j_mode(question, progress_tracker)
             else:
@@ -893,7 +984,8 @@ class EnhancedSimpleRAG:
                 self.neo4j_service = Neo4jService(
                     uri=self.config["neo4j_uri"],
                     username=self.config["neo4j_username"],
-                    password=self.config["neo4j_password"]
+                    password=self.config["neo4j_password"],
+                    database=self.config.get("neo4j_database") or None
                 )
                 logger.info(". Neo4j service initialized")
             except Exception as e:
@@ -1263,5 +1355,106 @@ class EnhancedSimpleRAG:
                 results.append(f"  Result {i+1}: {ctx['text'][:300]}...")
         
         return "\n".join(results)
+    # ── PageIndex service ─────────────────────────────────────────────────────
+
+    def _initialize_pageindex_service(self):
+        """Initialise PageIndexService if dependencies and an LLM key are present."""
+        if not self.config.get("pageindex_enabled", True):
+            logger.info("PageIndex service disabled in config")
+            return
+        try:
+            svc = PageIndexService(self.config)
+            if svc.is_ready():
+                self.pageindex_service = svc
+                logger.info("PageIndex service initialised (model=%s)", svc.model)
+            else:
+                self.initialization_warnings.append(
+                    "PageIndex service not ready — install pageindex package "
+                    "and set claude_api_key or gemini_api_key"
+                )
+        except Exception as e:
+            self.initialization_warnings.append(f"PageIndex init warning: {e}")
+
+    def is_pageindex_ready(self) -> bool:
+        """Return True if PageIndex indexing and querying are available."""
+        return self.pageindex_service is not None and self.pageindex_service.is_ready()
+
+    def index_document_pageindex(
+        self,
+        file_path: str,
+        progress_tracker=None,
+    ) -> Dict[str, Any]:
+        """Build a PageIndex tree for *file_path* (vectorless indexing)."""
+        if not self.is_pageindex_ready():
+            return {
+                "success": False,
+                "error":   "PageIndex service not available. "
+                           "Install the pageindex package and set an LLM API key.",
+            }
+        return self.pageindex_service.index_document(file_path, progress_tracker)
+
+    def query_pageindex(
+        self,
+        question:  str,
+        doc_id:    str = None,
+        session_id: str = None,
+    ) -> Dict[str, Any]:
+        """
+        Run a PageIndex agentic query.
+
+        Returns a dict with keys: success, answer, citations, tree_path,
+        tool_calls, doc_id, doc_name, error.
+        """
+        if not self.is_pageindex_ready():
+            return PageIndexService._error_result(
+                "PageIndex service not available. "
+                "Install the pageindex package and set an LLM API key."
+            )
+
+        progress_tracker = None
+        if session_id:
+            from extensions import ProgressTracker
+            progress_tracker = ProgressTracker(session_id, "query")
+            progress_tracker.update(0, 100, status="starting",
+                                    message="PageIndex agentic query starting…")
+
+        return self.pageindex_service.query(question, doc_id, progress_tracker)
+
+    # ── set_rag_mode: extend to include 'pageindex' ───────────────────────────
+
+    def set_rag_mode(self, mode: str):
+        """Switch between 'normal', 'graph', 'neo4j', 'hybrid_neo4j', 'pageindex'."""
+        valid = {"normal", "graph", "neo4j", "hybrid_neo4j", "pageindex"}
+        if mode not in valid:
+            raise ValueError(f"RAG mode must be one of {sorted(valid)}")
+
+        if mode == "graph" and not self.is_graph_ready():
+            raise RuntimeError("Graph RAG mode not available — check service initialisation")
+        if mode == "neo4j" and not self.is_neo4j_ready():
+            raise RuntimeError("Neo4j mode not available — check Neo4j configuration")
+        if mode == "hybrid_neo4j":
+            if not self.is_graph_ready():
+                raise RuntimeError("Graph RAG not available for hybrid mode")
+            if not self.is_neo4j_ready():
+                raise RuntimeError("Neo4j not available for hybrid mode")
+        if mode == "pageindex" and not self.is_pageindex_ready():
+            raise RuntimeError(
+                "PageIndex mode not available — install the pageindex package "
+                "and set claude_api_key or gemini_api_key"
+            )
+
+        old_mode = self.rag_mode
+        self.rag_mode = mode
+        self.config_manager.set("rag_mode", mode)
+        self.config_manager.save()
+
+        if self.document_processor:
+            self.document_processor.rag_mode = mode
+        if self.llm_service:
+            self.llm_service.rag_mode = mode
+
+        logger.info("RAG mode changed from %s to %s", old_mode, mode)
+
+
 # Backward compatibility alias
 SimpleRAG = EnhancedSimpleRAG

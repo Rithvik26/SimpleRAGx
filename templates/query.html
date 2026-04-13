@@ -58,14 +58,32 @@
                         <small class="text-muted">Best for complex relationship queries - combines vector search, knowledge graph, and Neo4j graph database</small>
                     </div>
                 </div>
-                <!-- NEW: Parallel mode option -->
+                <!-- PageIndex option -->
+                <div class="form-check">
+                    <input class="form-check-input" type="radio" name="rag_mode" id="query_pageindex" value="pageindex">
+                    <label class="form-check-label" for="query_pageindex">
+                        <strong>🌲 PageIndex RAG</strong>
+                        <span class="badge bg-warning text-dark ms-1">NEW</span>
+                        <span class="badge bg-secondary ms-1">Vectorless</span>
+                        - Reasoning-based tree search
+                    </label>
+                    <div class="form-text ms-4">
+                        <small class="text-muted">
+                            Agent navigates the document tree to find exact page references.
+                            Returns traceable citations with page numbers and section context.
+                            Requires a document indexed with PageIndex mode.
+                        </small>
+                    </div>
+                </div>
+
+                <!-- Parallel mode option -->
                 <div class="form-check">
                     <input class="form-check-input" type="radio" name="rag_mode" id="query_parallel" value="parallel">
                     <label class="form-check-label" for="query_parallel">
                         <strong>🚀 Parallel Mode</strong> - Run all modes simultaneously
                     </label>
                     <div class="form-text ms-4">
-                        <small class="text-muted">Compare results from all three modes with performance analytics</small>
+                        <small class="text-muted">Compare results from all modes (including PageIndex) with performance analytics</small>
                     </div>
                 </div>
             </div>
@@ -127,6 +145,12 @@
                 </button>
             </li>
             <li class="nav-item" role="presentation">
+                <button class="nav-link" id="pageindex-tab" data-bs-toggle="tab" data-bs-target="#pageindex-result" type="button" role="tab">
+                    🌲 PageIndex
+                    <span class="badge bg-warning text-dark ms-1">{{ parallel_results.results.pageindex.time }}s</span>
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
                 <button class="nav-link" id="comparison-tab" data-bs-toggle="tab" data-bs-target="#comparison-view" type="button" role="tab">
                     📊 Comparison
                 </button>
@@ -185,6 +209,23 @@
                 </div>
             </div>
 
+            <!-- PageIndex Result -->
+            <div class="tab-pane fade" id="pageindex-result" role="tabpanel">
+                <div class="result-container">
+                    {% if parallel_results.results.pageindex.error %}
+                        <div class="alert alert-danger">
+                            <strong>Error:</strong> {{ parallel_results.results.pageindex.error }}
+                        </div>
+                    {% elif parallel_results.results.pageindex.answer %}
+                        <div class="answer-text">
+                            {{ parallel_results.results.pageindex.answer | replace('\n', '<br>') | safe }}
+                        </div>
+                    {% else %}
+                        <div class="alert alert-warning">No PageIndex result available</div>
+                    {% endif %}
+                </div>
+            </div>
+
             <!-- Comparison View -->
 <div class="tab-pane fade" id="comparison-view" role="tabpanel">
     <div class="row">
@@ -195,12 +236,12 @@
             </div>
         </div>
     </div>
-    
+
     <!-- Performance Table -->
     <div class="row mt-4">
         <div class="col-12">
             <h6>Detailed Performance Metrics</h6>
-            {% set min_time = [parallel_results.results.normal.time, parallel_results.results.graph.time, parallel_results.results.hybrid_neo4j.time] | select | min %}
+            {% set min_time = [parallel_results.results.normal.time, parallel_results.results.graph.time, parallel_results.results.hybrid_neo4j.time, parallel_results.results.pageindex.time] | select | min %}
             <table class="table table-sm table-hover">
                 <thead>
                     <tr>
@@ -265,6 +306,24 @@
                             {% endif %}
                         </td>
                     </tr>
+                    <tr>
+                        <td><strong>🌲 PageIndex RAG</strong> <span class="badge bg-warning text-dark">NEW</span></td>
+                        <td>{{ parallel_results.results.pageindex.time }}s</td>
+                        <td>
+                            {% if parallel_results.results.pageindex.error %}
+                                <span class="badge bg-danger">Error</span>
+                            {% else %}
+                                <span class="badge bg-success">Success</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if parallel_results.results.pageindex.time > 0 and not parallel_results.results.pageindex.error %}
+                                {{ ((parallel_results.results.pageindex.time / min_time * 100) | round(0)) }}%
+                            {% else %}
+                                N/A
+                            {% endif %}
+                        </td>
+                    </tr>
                 </tbody>
             </table>
         </div>
@@ -274,6 +333,99 @@
     </div>
 </div>
 
+{% if pageindex_result %}
+<!-- PageIndex Result Display -->
+<div class="card mt-4 border-warning">
+    <div class="card-header bg-warning text-dark d-flex align-items-center gap-2">
+        <span>🌲</span>
+        <strong>PageIndex Answer</strong>
+        {% if pageindex_result.doc_name %}
+            <small class="ms-auto text-dark opacity-75">from: {{ pageindex_result.doc_name }}</small>
+        {% endif %}
+    </div>
+    <div class="card-body">
+        <div class="answer-text mb-3">
+            {{ pageindex_result.answer | replace('\n', '<br>') | safe }}
+        </div>
+
+        {% if pageindex_result.citations %}
+        <!-- Citations section -->
+        <div class="mt-3">
+            <h6 class="text-warning">📄 Retrieved Pages</h6>
+            <div class="accordion" id="citationsAccordion">
+                {% for cite in pageindex_result.citations %}
+                <div class="accordion-item border-warning">
+                    <h2 class="accordion-header" id="citeHead{{ loop.index }}">
+                        <button class="accordion-button collapsed py-2" type="button"
+                                data-bs-toggle="collapse"
+                                data-bs-target="#citeBody{{ loop.index }}"
+                                aria-expanded="false"
+                                aria-controls="citeBody{{ loop.index }}">
+                            <span class="badge bg-warning text-dark me-2">p. {{ cite.pages }}</span>
+                            {% if cite.section %}
+                                <span class="text-muted small">{{ cite.section }}</span>
+                            {% endif %}
+                        </button>
+                    </h2>
+                    <div id="citeBody{{ loop.index }}" class="accordion-collapse collapse"
+                         aria-labelledby="citeHead{{ loop.index }}"
+                         data-bs-parent="#citationsAccordion">
+                        <div class="accordion-body py-2">
+                            <pre class="mb-0" style="white-space: pre-wrap; font-size: 0.85em;">{{ cite.content }}</pre>
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        {% if pageindex_result.tree_path %}
+        <!-- Tree path breadcrumb -->
+        <div class="mt-3">
+            <h6 class="text-warning">🗺 Reasoning Path</h6>
+            <nav aria-label="tree path">
+                <ol class="breadcrumb">
+                    <li class="breadcrumb-item text-muted">Root</li>
+                    {% for section in pageindex_result.tree_path %}
+                    <li class="breadcrumb-item">{{ section }}</li>
+                    {% endfor %}
+                </ol>
+            </nav>
+        </div>
+        {% endif %}
+
+        {% if pageindex_result.tool_calls %}
+        <!-- Agent reasoning steps (collapsible) -->
+        <div class="mt-3">
+            <a class="btn btn-sm btn-outline-secondary" data-bs-toggle="collapse"
+               href="#agentSteps" role="button" aria-expanded="false">
+                Show agent reasoning steps ({{ pageindex_result.tool_calls | length }} tool calls)
+            </a>
+            <div class="collapse mt-2" id="agentSteps">
+                <div class="list-group list-group-flush border rounded">
+                    {% for tc in pageindex_result.tool_calls %}
+                    <div class="list-group-item py-2">
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="badge bg-secondary">{{ loop.index }}</span>
+                            <code class="text-warning">{{ tc.tool }}</code>
+                            {% if tc.args %}
+                                <small class="text-muted">{{ tc.args | tojson }}</small>
+                            {% endif %}
+                        </div>
+                        {% if tc.result_preview %}
+                        <div class="mt-1">
+                            <small class="text-muted font-monospace">{{ tc.result_preview }}</small>
+                        </div>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
 {% elif in_progress %}
 <!-- Query Progress Display -->
 <div id="query-progress" class="card mt-4">
@@ -499,7 +651,8 @@ document.addEventListener('DOMContentLoaded', function() {
     // Poll for query progress
     let queryPollInterval;
     let queryCompleted = false;
-    const isParallelMode = {{ 'true' if parallel_mode else 'false' }};
+    const isParallelMode  = {{ 'true' if parallel_mode else 'false' }};
+    const isPageIndexMode = {{ 'true' if pageindex_mode else 'false' }};
 
     function updateQueryProgress() {
         fetch('/api/progress/query')
@@ -534,7 +687,14 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     
     function fetchQueryResult() {
-        const endpoint = isParallelMode ? '/api/query/parallel-result' : '/api/query/result';
+        let endpoint;
+        if (isParallelMode) {
+            endpoint = '/api/query/parallel-result';
+        } else if (isPageIndexMode) {
+            endpoint = '/api/query/pageindex-result';
+        } else {
+            endpoint = '/api/query/result';
+        }
         
         fetch(endpoint)
             .then(response => {
@@ -553,7 +713,9 @@ document.addEventListener('DOMContentLoaded', function() {
                 
                 if (isParallelMode && data.result) {
                     completeParallelQueryProcess(data.result);
-                } else if (!isParallelMode && data.result) {
+                } else if (isPageIndexMode && data.result) {
+                    completePageIndexQueryProcess(data.result);
+                } else if (!isParallelMode && !isPageIndexMode && data.result) {
                     completeQueryProcess(data.result);
                 } else {
                     // Retry if no result yet
@@ -572,13 +734,97 @@ document.addEventListener('DOMContentLoaded', function() {
         if (!queryCompleted) {
             queryCompleted = true;
             clearInterval(queryPollInterval);
-            
-            // Hide progress elements
             document.getElementById('query-progress').style.display = 'none';
-            
-            // Show parallel results
             showParallelResults(parallelResults);
         }
+    }
+
+    function completePageIndexQueryProcess(result) {
+        if (!queryCompleted) {
+            queryCompleted = true;
+            clearInterval(queryPollInterval);
+            document.getElementById('query-progress').style.display = 'none';
+
+            const container = document.getElementById('answer-container');
+            container.style.display = 'block';
+
+            if (!result.success || result.error) {
+                container.innerHTML = `<div class="alert alert-danger"><strong>PageIndex Error:</strong> ${escHtml(result.error || 'Unknown error')}</div>`;
+                return;
+            }
+
+            // Build citations HTML
+            let citationsHtml = '';
+            if (result.citations && result.citations.length > 0) {
+                citationsHtml = '<div class="mt-3"><h6 class="text-warning">📄 Retrieved Pages</h6><div class="accordion" id="dynCitationsAccordion">';
+                result.citations.forEach((cite, idx) => {
+                    citationsHtml += `
+                        <div class="accordion-item border-warning">
+                            <h2 class="accordion-header" id="dynCiteHead${idx}">
+                                <button class="accordion-button collapsed py-2" type="button"
+                                        data-bs-toggle="collapse" data-bs-target="#dynCiteBody${idx}">
+                                    <span class="badge bg-warning text-dark me-2">p. ${escHtml(cite.pages)}</span>
+                                    ${cite.section ? `<span class="text-muted small">${escHtml(cite.section)}</span>` : ''}
+                                </button>
+                            </h2>
+                            <div id="dynCiteBody${idx}" class="accordion-collapse collapse">
+                                <div class="accordion-body py-2">
+                                    <pre class="mb-0" style="white-space:pre-wrap;font-size:0.85em;">${escHtml(cite.content)}</pre>
+                                </div>
+                            </div>
+                        </div>`;
+                });
+                citationsHtml += '</div></div>';
+            }
+
+            // Build tree path HTML
+            let treePathHtml = '';
+            if (result.tree_path && result.tree_path.length > 0) {
+                const crumbs = result.tree_path.map(s => `<li class="breadcrumb-item">${escHtml(s)}</li>`).join('');
+                treePathHtml = `<div class="mt-3"><h6 class="text-warning">🗺 Reasoning Path</h6>
+                    <nav><ol class="breadcrumb"><li class="breadcrumb-item text-muted">Root</li>${crumbs}</ol></nav></div>`;
+            }
+
+            // Build tool calls HTML
+            let toolCallsHtml = '';
+            if (result.tool_calls && result.tool_calls.length > 0) {
+                const items = result.tool_calls.map((tc, i) => `
+                    <div class="list-group-item py-2">
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="badge bg-secondary">${i + 1}</span>
+                            <code class="text-warning">${escHtml(tc.tool)}</code>
+                            ${tc.args ? `<small class="text-muted">${escHtml(JSON.stringify(tc.args))}</small>` : ''}
+                        </div>
+                        ${tc.result_preview ? `<div class="mt-1"><small class="text-muted font-monospace">${escHtml(tc.result_preview)}</small></div>` : ''}
+                    </div>`).join('');
+                toolCallsHtml = `<div class="mt-3">
+                    <a class="btn btn-sm btn-outline-secondary" data-bs-toggle="collapse" href="#dynAgentSteps">
+                        Show agent reasoning steps (${result.tool_calls.length} tool calls)
+                    </a>
+                    <div class="collapse mt-2" id="dynAgentSteps">
+                        <div class="list-group list-group-flush border rounded">${items}</div>
+                    </div></div>`;
+            }
+
+            const docLabel = result.doc_name ? `<small class="ms-auto text-dark opacity-75">from: ${escHtml(result.doc_name)}</small>` : '';
+            container.innerHTML = `
+                <div class="card border-warning">
+                    <div class="card-header bg-warning text-dark d-flex align-items-center gap-2">
+                        <span>🌲</span><strong>PageIndex Answer</strong>${docLabel}
+                    </div>
+                    <div class="card-body">
+                        <div class="answer-text mb-3">${result.answer.replace(/\n/g, '<br>')}</div>
+                        ${citationsHtml}${treePathHtml}${toolCallsHtml}
+                    </div>
+                </div>`;
+        }
+    }
+
+    function escHtml(str) {
+        if (str === null || str === undefined) return '';
+        return String(str)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
     function completeQueryProcess(result) {
         if (!queryCompleted) {
@@ -652,6 +898,12 @@ document.addEventListener('DOMContentLoaded', function() {
                             </button>
                         </li>
                         <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="pageindex-tab" data-bs-toggle="tab" data-bs-target="#pageindex-result" type="button" role="tab">
+                                🌲 PageIndex
+                                <span class="badge bg-warning text-dark ms-1">${(parallelResults.results.pageindex||{}).time || 0}s</span>
+                            </button>
+                        </li>
+                        <li class="nav-item" role="presentation">
                             <button class="nav-link" id="comparison-tab" data-bs-toggle="tab" data-bs-target="#comparison-view" type="button" role="tab">
                                 📊 Comparison
                             </button>
@@ -662,6 +914,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         ${generateResultTab('normal', parallelResults.results.normal, 'show active')}
                         ${generateResultTab('graph', parallelResults.results.graph, '')}
                         ${generateResultTab('hybrid_neo4j', parallelResults.results.hybrid_neo4j, '')}
+                        ${generateResultTab('pageindex', parallelResults.results.pageindex || {}, '')}
                         ${generateComparisonTab(parallelResults)}
                     </div>
                 </div>
@@ -675,47 +928,36 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function createPerformanceChart(parallelResults) {
-        // Wait for DOM to be ready
         setTimeout(() => {
             const ctx = document.getElementById('dynamicPerformanceChart');
             if (ctx) {
+                const r = parallelResults.results;
                 new Chart(ctx.getContext('2d'), {
                     type: 'bar',
                     data: {
-                        labels: ['Normal RAG', 'Graph RAG', 'Hybrid Neo4j'],
+                        labels: ['Normal RAG', 'Graph RAG', 'Hybrid Neo4j', '🌲 PageIndex'],
                         datasets: [{
                             label: 'Response Time (seconds)',
-                            data: [
-                                parallelResults.results.normal.time,
-                                parallelResults.results.graph.time,
-                                parallelResults.results.hybrid_neo4j.time
-                            ],
+                            data: [r.normal.time, r.graph.time, r.hybrid_neo4j.time, (r.pageindex || {}).time || 0],
                             backgroundColor: [
-                                parallelResults.results.normal.error ? 'rgba(255, 99, 132, 0.5)' : 'rgba(54, 162, 235, 0.5)',
-                                parallelResults.results.graph.error ? 'rgba(255, 99, 132, 0.5)' : 'rgba(75, 192, 192, 0.5)',
-                                parallelResults.results.hybrid_neo4j.error ? 'rgba(255, 99, 132, 0.5)' : 'rgba(255, 206, 86, 0.5)'
+                                r.normal.error       ? 'rgba(255,99,132,0.5)'  : 'rgba(54,162,235,0.5)',
+                                r.graph.error        ? 'rgba(255,99,132,0.5)'  : 'rgba(75,192,192,0.5)',
+                                r.hybrid_neo4j.error ? 'rgba(255,99,132,0.5)'  : 'rgba(255,206,86,0.5)',
+                                (r.pageindex||{}).error ? 'rgba(255,99,132,0.5)' : 'rgba(255,159,64,0.5)',
                             ],
                             borderColor: [
-                                parallelResults.results.normal.error ? 'rgba(255, 99, 132, 1)' : 'rgba(54, 162, 235, 1)',
-                                parallelResults.results.graph.error ? 'rgba(255, 99, 132, 1)' : 'rgba(75, 192, 192, 1)',
-                                parallelResults.results.hybrid_neo4j.error ? 'rgba(255, 99, 132, 1)' : 'rgba(255, 206, 86, 1)'
+                                r.normal.error       ? 'rgba(255,99,132,1)'  : 'rgba(54,162,235,1)',
+                                r.graph.error        ? 'rgba(255,99,132,1)'  : 'rgba(75,192,192,1)',
+                                r.hybrid_neo4j.error ? 'rgba(255,99,132,1)'  : 'rgba(255,206,86,1)',
+                                (r.pageindex||{}).error ? 'rgba(255,99,132,1)' : 'rgba(255,159,64,1)',
                             ],
-                            borderWidth: 2
+                            borderWidth: 2,
                         }]
                     },
                     options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        scales: {
-                            y: {
-                                beginAtZero: true,
-                                title: { display: true, text: 'Time (seconds)' }
-                            }
-                        },
-                        plugins: {
-                            legend: { display: false },
-                            title: { display: true, text: 'Query Processing Time by Mode' }
-                        }
+                        responsive: true, maintainAspectRatio: false,
+                        scales: { y: { beginAtZero: true, title: { display: true, text: 'Time (seconds)' } } },
+                        plugins: { legend: { display: false }, title: { display: true, text: 'Query Processing Time by Mode' } }
                     }
                 });
             }
@@ -724,10 +966,12 @@ document.addEventListener('DOMContentLoaded', function() {
 
 
     function generateComparisonTab(parallelResults) {
+        const r = parallelResults.results;
         const minTime = Math.min(
-            parallelResults.results.normal.time || Infinity,
-            parallelResults.results.graph.time || Infinity,
-            parallelResults.results.hybrid_neo4j.time || Infinity
+            r.normal.time || Infinity,
+            r.graph.time || Infinity,
+            r.hybrid_neo4j.time || Infinity,
+            (r.pageindex || {}).time || Infinity
         );
         
         return `
@@ -785,17 +1029,15 @@ document.addEventListener('DOMContentLoaded', function() {
                                 </tr>
                                 <tr>
                                     <td><strong>Hybrid Neo4j</strong></td>
-                                    <td>${parallelResults.results.hybrid_neo4j.time}s</td>
-                                    <td>
-                                        ${parallelResults.results.hybrid_neo4j.error 
-                                            ? '<span class="badge bg-danger">Error</span>'
-                                            : '<span class="badge bg-success">Success</span>'}
-                                    </td>
-                                    <td>
-                                        ${parallelResults.results.hybrid_neo4j.time > 0 && !parallelResults.results.hybrid_neo4j.error
-                                            ? Math.round((parallelResults.results.hybrid_neo4j.time / minTime * 100)) + '%'
-                                            : 'N/A'}
-                                    </td>
+                                    <td>${r.hybrid_neo4j.time}s</td>
+                                    <td>${r.hybrid_neo4j.error ? '<span class="badge bg-danger">Error</span>' : '<span class="badge bg-success">Success</span>'}</td>
+                                    <td>${r.hybrid_neo4j.time > 0 && !r.hybrid_neo4j.error ? Math.round(r.hybrid_neo4j.time / minTime * 100) + '%' : 'N/A'}</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>🌲 PageIndex RAG</strong> <span class="badge bg-warning text-dark">NEW</span></td>
+                                    <td>${(r.pageindex||{}).time || 0}s</td>
+                                    <td>${(r.pageindex||{}).error ? '<span class="badge bg-danger">Error</span>' : '<span class="badge bg-success">Success</span>'}</td>
+                                    <td>${(r.pageindex||{}).time > 0 && !(r.pageindex||{}).error ? Math.round((r.pageindex||{}).time / minTime * 100) + '%' : 'N/A'}</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -808,16 +1050,17 @@ document.addEventListener('DOMContentLoaded', function() {
 
     function generateResultTab(mode, result, activeClass) {
         const modeNames = {
-            'normal': 'Normal RAG',
-            'graph': 'Graph RAG', 
-            'hybrid_neo4j': 'Hybrid Neo4j'
+            'normal':       'Normal RAG',
+            'graph':        'Graph RAG',
+            'hybrid_neo4j': 'Hybrid Neo4j',
+            'pageindex':    '🌲 PageIndex',
         };
-        
-        // FIX: Map mode to correct tab ID
+
         const tabIdMap = {
-            'normal': 'normal-result',
-            'graph': 'graph-result',
-            'hybrid_neo4j': 'hybrid-result'  // Changed from hybrid_neo4j-result to hybrid-result
+            'normal':       'normal-result',
+            'graph':        'graph-result',
+            'hybrid_neo4j': 'hybrid-result',
+            'pageindex':    'pageindex-result',
         };
         
         const tabId = tabIdMap[mode] || `${mode}-result`;

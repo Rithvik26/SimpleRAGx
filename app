@@ -21,6 +21,8 @@ import concurrent.futures
 from typing import Dict, Any
 from datetime import datetime
 parallel_query_results = {}
+# Storage for async PageIndex query results keyed by session_id
+pageindex_query_results = {}
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
@@ -173,12 +175,13 @@ def process_parallel_queries(question: str, session_id: str) -> Dict[str, Any]:
     results = {
         'normal': {'answer': None, 'time': 0, 'error': None},
         'graph': {'answer': None, 'time': 0, 'error': None},
-        'hybrid_neo4j': {'answer': None, 'time': 0, 'error': None}
+        'hybrid_neo4j': {'answer': None, 'time': 0, 'error': None},
+        'pageindex': {'answer': None, 'time': 0, 'error': None},
     }
     
     if progress_tracker:
-        progress_tracker.update(20, 100, status="processing", 
-                               message="Starting parallel execution in 3 modes")
+        progress_tracker.update(20, 100, status="processing",
+                               message="Starting parallel execution in all modes")
     
     # Create a lock for thread-safe mode switching
     mode_lock = threading.Lock()
@@ -204,6 +207,10 @@ def process_parallel_queries(question: str, session_id: str) -> Dict[str, Any]:
                     if not simplerag_instance.is_graph_ready():
                         elapsed_time = time.time() - start_time
                         return (mode, None, elapsed_time, "Graph RAG not initialized")
+                elif mode == 'pageindex':
+                    if not simplerag_instance.is_pageindex_ready():
+                        elapsed_time = time.time() - start_time
+                        return (mode, None, elapsed_time, "PageIndex not available")
                 
                 # Set mode temporarily
                 simplerag_instance.set_rag_mode(mode)
@@ -258,7 +265,7 @@ def process_parallel_queries(question: str, session_id: str) -> Dict[str, Any]:
         return result
     
     # Create and start threads with the fixed worker function
-    for mode in ['normal', 'graph', 'hybrid_neo4j']:
+    for mode in ['normal', 'graph', 'hybrid_neo4j', 'pageindex']:
         thread = threading.Thread(target=thread_worker, args=(mode,))
         threads.append(thread)
         thread.start()
@@ -268,7 +275,7 @@ def process_parallel_queries(question: str, session_id: str) -> Dict[str, Any]:
         thread.join()
     
     # Process results
-    for mode in ['normal', 'graph', 'hybrid_neo4j']:
+    for mode in ['normal', 'graph', 'hybrid_neo4j', 'pageindex']:
         if mode in mode_results:
             mode_name, answer, elapsed_time, error = mode_results[mode]
             results[mode]['answer'] = answer
@@ -280,14 +287,18 @@ def process_parallel_queries(question: str, session_id: str) -> Dict[str, Any]:
     # Calculate analytics
     successful_modes = [mode for mode in results if not results[mode]['error']]
     fastest_mode = min(successful_modes, key=lambda m: results[m]['time']) if successful_modes else None
-    
+    total_mode_count = len(results)
+
     analytics = {
-        'total_modes': 3,
+        'total_modes': total_mode_count,
         'successful_modes': len(successful_modes),
-        'failed_modes': 3 - len(successful_modes),
+        'failed_modes': total_mode_count - len(successful_modes),
         'fastest_mode': fastest_mode,
         'total_time': max(results[mode]['time'] for mode in results),
-        'average_time': sum(results[mode]['time'] for mode in results if not results[mode]['error']) / len(successful_modes) if successful_modes else 0
+        'average_time': (
+            sum(results[mode]['time'] for mode in results if not results[mode]['error']) /
+            len(successful_modes)
+        ) if successful_modes else 0,
     }
     
     return {
@@ -621,9 +632,78 @@ def upload():
         
         # Get RAG mode
         upload_rag_mode = request.form.get('rag_mode', 'normal')
-        if upload_rag_mode not in ['normal', 'graph', 'neo4j']:
+        if upload_rag_mode not in ['normal', 'graph', 'neo4j', 'pageindex']:
             upload_rag_mode = 'normal'
-            
+
+        # ── PageIndex branch: vectorless tree indexing ──────────────────────
+        if upload_rag_mode == 'pageindex':
+            if not simplerag_instance or not simplerag_instance.is_pageindex_ready():
+                flash(
+                    'PageIndex is not available. Install the pageindex package and '
+                    'set claude_api_key or gemini_api_key.',
+                    'danger'
+                )
+                return redirect(url_for('setup'))
+
+            config = get_config_manager().get_all()
+            if not (config.get("claude_api_key") or config.get("gemini_api_key")):
+                flash('PageIndex requires claude_api_key or gemini_api_key.', 'danger')
+                return redirect(url_for('setup'))
+
+            try:
+                filename = secure_filename(file.filename)
+                file_path = os.path.join(
+                    app.config['UPLOAD_FOLDER'],
+                    f"{session.get('session_id', 'unknown')}_{filename}"
+                )
+                file.save(file_path)
+                logger.info(f"File saved for PageIndex: {file_path}")
+            except Exception as e:
+                flash(f'Error saving file: {e}', 'danger')
+                return redirect(request.url)
+
+            session_id = session.get('session_id')
+            progress_tracker = ProgressTracker(session_id, "index_document")
+            progress_tracker.update(0, 100, status="starting",
+                                    message=f"Starting PageIndex tree build for {filename}…")
+
+            def _pageindex_index_worker(fp, sid):
+                global simplerag_instance
+                try:
+                    tracker = ProgressTracker.get_tracker(sid, "index_document")
+                    result = simplerag_instance.index_document_pageindex(fp, tracker)
+                    if not result.get("success"):
+                        if tracker:
+                            tracker.update(100, 100, status="error",
+                                           message=f"PageIndex indexing failed: {result.get('error')}")
+                    logger.info(f"PageIndex indexing done: {result}")
+                except Exception as e:
+                    logger.error(f"PageIndex indexing thread error: {e}")
+                    tracker = ProgressTracker.get_tracker(sid, "index_document")
+                    if tracker:
+                        tracker.update(100, 100, status="error", message=str(e))
+                finally:
+                    try:
+                        if os.path.exists(fp):
+                            os.remove(fp)
+                    except Exception:
+                        pass
+
+            t = threading.Thread(
+                target=_pageindex_index_worker,
+                args=(file_path, session_id),
+                daemon=True,
+            )
+            t.start()
+
+            flash(
+                f"'{filename}' queued for PageIndex tree building. "
+                "This may take 2–5 minutes for long PDFs.",
+                'success'
+            )
+            return redirect(url_for('upload_progress'))
+        # ── End PageIndex branch ────────────────────────────────────────────
+
         if upload_rag_mode == 'neo4j' and not simplerag_instance.is_neo4j_ready():
             flash('Neo4j service not available. Please configure Neo4j settings first.', 'danger')
             return redirect(url_for('setup'))
@@ -744,8 +824,58 @@ def query():
             return redirect(url_for('setup'))
         
         session_id = session.get('session_id')
-        
-        
+
+        # ── PageIndex query branch ──────────────────────────────────────────
+        if query_rag_mode == 'pageindex':
+            if not simplerag_instance or not simplerag_instance.is_pageindex_ready():
+                flash(
+                    'PageIndex is not available. Install the pageindex package and '
+                    'set claude_api_key or gemini_api_key.',
+                    'danger'
+                )
+                return render_template('query.html', question=question,
+                                       config=config_manager.get_all())
+
+            progress_tracker = ProgressTracker(session_id, "query")
+            progress_tracker.update(0, 100, status="starting",
+                                    message="PageIndex agent starting…")
+
+            def _pageindex_query_worker(q, sid):
+                global pageindex_query_results
+                try:
+                    tracker = ProgressTracker.get_tracker(sid, "query")
+                    result  = simplerag_instance.query_pageindex(q, session_id=sid)
+                    pageindex_query_results[sid] = result
+                    if tracker:
+                        tracker.update(100, 100, status="complete",
+                                       message="PageIndex query complete")
+                except Exception as e:
+                    logger.error(f"PageIndex query thread error: {e}")
+                    pageindex_query_results[sid] = {
+                        "success": False, "answer": f"Error: {e}",
+                        "citations": [], "tree_path": [], "tool_calls": [],
+                        "error": str(e),
+                    }
+                    tracker = ProgressTracker.get_tracker(sid, "query")
+                    if tracker:
+                        tracker.update(100, 100, status="error", message=str(e))
+
+            t = threading.Thread(
+                target=_pageindex_query_worker,
+                args=(question, session_id),
+                daemon=True,
+            )
+            t.start()
+
+            return render_template(
+                'query.html',
+                question=question,
+                in_progress=True,
+                pageindex_mode=True,
+                config=config_manager.get_all(),
+            )
+        # ── End PageIndex query branch ──────────────────────────────────────
+
         # Handle parallel mode
         if query_rag_mode == 'parallel':
             try:
@@ -875,9 +1005,10 @@ def process_parallel_queries_async(question: str, session_id: str):
         parallel_query_results[session_id] = {
             'error': str(e),
             'results': {
-                'normal': {'answer': None, 'time': 0, 'error': str(e)},
-                'graph': {'answer': None, 'time': 0, 'error': str(e)},
-                'hybrid_neo4j': {'answer': None, 'time': 0, 'error': str(e)}
+                'normal':       {'answer': None, 'time': 0, 'error': str(e)},
+                'graph':        {'answer': None, 'time': 0, 'error': str(e)},
+                'hybrid_neo4j': {'answer': None, 'time': 0, 'error': str(e)},
+                'pageindex':    {'answer': None, 'time': 0, 'error': str(e)},
             }
         }
 
@@ -897,6 +1028,55 @@ def get_parallel_query_result():
         return jsonify({"result": result})
     
     return jsonify({"error": "No result available"}), 404
+
+@app.route('/api/query/pageindex-result')
+def get_pageindex_query_result():
+    """Return the completed PageIndex query result for the current session."""
+    global pageindex_query_results
+    session_id = session.get('session_id')
+    if not session_id:
+        return jsonify({"error": "No session found"}), 404
+
+    result = pageindex_query_results.get(session_id)
+    if result:
+        del pageindex_query_results[session_id]
+        return jsonify({"result": result})
+    return jsonify({"error": "No result available yet"}), 404
+
+
+@app.route('/api/pageindex/documents')
+def list_pageindex_documents():
+    """Return all PageIndex-indexed documents (metadata only)."""
+    if not simplerag_instance or not simplerag_instance.is_pageindex_ready():
+        return jsonify({"error": "PageIndex not available", "documents": []}), 200
+
+    docs = simplerag_instance.pageindex_service.list_documents()
+    return jsonify({"documents": docs, "count": len(docs)})
+
+
+@app.route('/api/pageindex/tree/<doc_id>')
+def get_pageindex_tree(doc_id):
+    """Return the full tree structure for a given PageIndex document (for tree viewer)."""
+    if not simplerag_instance or not simplerag_instance.is_pageindex_ready():
+        return jsonify({"error": "PageIndex not available"}), 503
+
+    tree = simplerag_instance.pageindex_service.get_tree(doc_id)
+    if tree is None:
+        return jsonify({"error": f"Document {doc_id} not found"}), 404
+    return jsonify({"doc_id": doc_id, "structure": tree})
+
+
+@app.route('/api/pageindex/documents/<doc_id>', methods=['DELETE'])
+def delete_pageindex_document(doc_id):
+    """Delete a PageIndex document from the workspace."""
+    if not simplerag_instance or not simplerag_instance.is_pageindex_ready():
+        return jsonify({"error": "PageIndex not available"}), 503
+
+    ok = simplerag_instance.pageindex_service.delete_document(doc_id)
+    if ok:
+        return jsonify({"success": True, "doc_id": doc_id})
+    return jsonify({"success": False, "error": "Could not delete document"}), 500
+
 
 @app.route('/api/query/result')
 def get_query_result():
