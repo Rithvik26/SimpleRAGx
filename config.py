@@ -40,11 +40,20 @@ DEFAULT_CONFIG = {
 
      # Neo4j Configuration
     "neo4j_uri": "",
-    "neo4j_username": "neo4j", 
+    "neo4j_username": "neo4j",
     "neo4j_password": "",
+    "neo4j_database": "neo4j",
     "neo4j_enabled": False,
 
-    
+    # PageIndex (Vectorless Reasoning-based RAG) Configuration
+    # model: leave blank to auto-detect from claude_api_key / gemini_api_key.
+    # Explicit LiteLLM model paths are also accepted, e.g.:
+    #   "anthropic/claude-3-5-sonnet-20241022"
+    #   "gemini/gemini-1.5-flash"
+    "pageindex_model":          "",
+    "pageindex_workspace":      "",    # defaults to ~/.simplerag/pageindex_workspace
+    "pageindex_max_tool_rounds": 4,    # agentic loop rounds before forcing final answer
+    "pageindex_enabled":        True,
 }
 
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "/tmp/simplerag_config.json")  # Use temp file instead
@@ -135,6 +144,8 @@ class ConfigManager:
             config["neo4j_username"] = os.getenv("NEO4J_USERNAME")
         if os.getenv("NEO4J_PASSWORD"):
             config["neo4j_password"] = os.getenv("NEO4J_PASSWORD")
+        if os.getenv("NEO4J_DATABASE"):
+            config["neo4j_database"] = os.getenv("NEO4J_DATABASE")
         if os.getenv("NEO4J_ENABLED"):
             config["neo4j_enabled"] = os.getenv("NEO4J_ENABLED").lower() == "true"
         for config_key, env_key in env_overrides.items():
@@ -234,8 +245,8 @@ class ConfigManager:
                     validation_result["valid"] = False
         
         # Validate mode settings
-        if self.config.get("rag_mode") not in ["normal", "graph", "neo4j", "hybrid_neo4j"]:
-            validation_result["errors"].append("rag_mode must be 'normal', 'graph', 'neo4j', or 'hybrid_neo4j'")
+        if self.config.get("rag_mode") not in ["normal", "graph", "neo4j", "hybrid_neo4j", "pageindex"]:
+            validation_result["errors"].append("rag_mode must be 'normal', 'graph', 'neo4j', 'hybrid_neo4j', or 'pageindex'")
             validation_result["valid"] = False
         
         if self.config.get("preferred_llm") not in ["claude", "raw"]:

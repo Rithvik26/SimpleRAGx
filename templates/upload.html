@@ -54,8 +54,28 @@
                         <small class="text-muted">📊 Extracts and stores knowledge graph in Neo4j without vector embeddings</small>
                     </div>
                 </div>
+
+                <!-- PageIndex option -->
+                <div class="form-check mt-2">
+                    <input class="form-check-input" type="radio" name="rag_mode" id="upload_pageindex" value="pageindex">
+                    <label class="form-check-label" for="upload_pageindex">
+                        <strong>PageIndex RAG</strong>
+                        <span class="badge bg-warning text-dark ms-1">NEW</span>
+                        <span class="badge bg-secondary ms-1">Vectorless</span>
+                        - Reasoning-based retrieval, no chunking or vector DB
+                    </label>
+                    <div class="form-text ms-4">
+                        <small class="text-muted">
+                            🌲 Builds a hierarchical tree index (like a smart Table of Contents) from your PDF.
+                            Best for long professional documents: annual reports, research papers, legal filings.
+                            <br>
+                            ⏱ Indexing time: ~2–5 min per 100 pages (one-time, LLM-based tree construction).
+                            No embeddings generated.
+                        </small>
+                    </div>
+                </div>
             </div>
-            
+
             <button type="submit" class="btn btn-primary">Upload & Index</button>
         </form>
     </div>
@@ -88,5 +108,205 @@
     <p class="alert alert-warning mt-3">
         <strong>Note:</strong> Graph RAG processing takes significantly longer than Normal RAG due to entity extraction and relationship mapping, but provides much richer contextual understanding.
     </p>
+
+    <!-- PageIndex explanation card -->
+    <div class="row mt-3">
+        <div class="col-12">
+            <div class="card border-warning">
+                <div class="card-header bg-warning text-dark d-flex align-items-center gap-2">
+                    <span>🌲</span>
+                    <strong>PageIndex RAG — How It Works</strong>
+                    <span class="badge bg-dark ms-auto">NEW — Vectorless</span>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <h6>Index Phase (one-time, ~2–5 min)</h6>
+                            <ol class="mb-0">
+                                <li>LLM reads the full document</li>
+                                <li>Builds a hierarchical tree (like a Table of Contents)</li>
+                                <li>Each node gets a title, page range, and summary</li>
+                                <li>Tree saved as JSON — <em>no vector DB needed</em></li>
+                            </ol>
+                        </div>
+                        <div class="col-md-6">
+                            <h6>Query Phase (~10–20 s)</h6>
+                            <ol class="mb-0">
+                                <li>LLM agent inspects the tree structure</li>
+                                <li>Reasons about which sections are relevant</li>
+                                <li>Fetches exact page text (tight ranges only)</li>
+                                <li>Synthesises answer with traceable page citations</li>
+                            </ol>
+                        </div>
+                    </div>
+                    <div class="alert alert-info mt-3 mb-0">
+                        <strong>Best for:</strong> Annual reports, SEC filings, research papers, legal manuals, technical specifications — any long document where exact section navigation matters.
+                        PageIndex achieved <strong>98.7% accuracy</strong> on the FinanceBench benchmark.
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
+
+<!-- PageIndex Indexed Documents Panel -->
+<div class="mt-4" id="pageindex-docs-panel" style="display:none;">
+    <div class="card border-warning">
+        <div class="card-header bg-warning text-dark d-flex justify-content-between align-items-center">
+            <strong>🌲 PageIndex Indexed Documents</strong>
+            <button class="btn btn-sm btn-outline-dark" onclick="loadPageIndexDocs()">Refresh</button>
+        </div>
+        <div class="card-body p-0">
+            <div id="pageindex-docs-list">
+                <div class="text-center p-3 text-muted">Loading…</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Tree Structure Modal -->
+<div class="modal fade" id="treeModal" tabindex="-1" aria-labelledby="treeModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header bg-warning text-dark">
+                <h5 class="modal-title" id="treeModalLabel">🌲 Document Tree Structure</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div id="tree-viewer-content">Loading tree…</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    // Show the PageIndex docs panel when the pageindex radio is selected
+    const piRadio = document.getElementById('upload_pageindex');
+    if (piRadio) {
+        piRadio.addEventListener('change', function () {
+            const panel = document.getElementById('pageindex-docs-panel');
+            if (this.checked) {
+                panel.style.display = 'block';
+                loadPageIndexDocs();
+            }
+        });
+    }
+});
+
+function loadPageIndexDocs() {
+    fetch('/api/pageindex/documents')
+        .then(r => r.json())
+        .then(data => {
+            const list = document.getElementById('pageindex-docs-list');
+            const docs = data.documents || [];
+            if (docs.length === 0) {
+                list.innerHTML = '<div class="text-center p-3 text-muted">No PageIndex documents yet. Upload a PDF above.</div>';
+                return;
+            }
+            let html = '<table class="table table-sm table-hover mb-0"><thead><tr>'
+                + '<th>Document</th><th>Pages</th><th>Sections</th><th>Status</th><th>Indexed</th><th></th>'
+                + '</tr></thead><tbody>';
+            docs.forEach(d => {
+                const statusBadge = d.status === 'ready'
+                    ? '<span class="badge bg-success">Ready</span>'
+                    : d.status === 'indexing'
+                        ? '<span class="badge bg-warning text-dark">Indexing…</span>'
+                        : '<span class="badge bg-danger">Failed</span>';
+                const indexedAt = d.indexed_at ? d.indexed_at.replace('T', ' ').replace('Z', '') : '—';
+                html += `<tr>
+                    <td><strong>${escHtml(d.doc_name)}</strong>
+                        ${d.doc_description ? `<br><small class="text-muted">${escHtml(d.doc_description.slice(0, 80))}…</small>` : ''}
+                    </td>
+                    <td>${d.page_count}</td>
+                    <td>${d.section_count}</td>
+                    <td>${statusBadge}</td>
+                    <td><small>${indexedAt}</small></td>
+                    <td>
+                        ${d.status === 'ready'
+                            ? `<button class="btn btn-sm btn-outline-warning me-1" onclick="viewTree('${d.doc_id}', '${escHtml(d.doc_name)}')">View Tree</button>`
+                            : ''}
+                        <button class="btn btn-sm btn-outline-danger" onclick="deleteDoc('${d.doc_id}')">Delete</button>
+                    </td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+            list.innerHTML = html;
+        })
+        .catch(() => {
+            document.getElementById('pageindex-docs-list').innerHTML =
+                '<div class="alert alert-danger m-2">Failed to load documents.</div>';
+        });
+}
+
+function viewTree(docId, docName) {
+    document.getElementById('treeModalLabel').textContent = '🌲 ' + docName;
+    document.getElementById('tree-viewer-content').innerHTML = '<div class="text-center p-3">Loading tree…</div>';
+    const modal = new bootstrap.Modal(document.getElementById('treeModal'));
+    modal.show();
+
+    fetch('/api/pageindex/tree/' + docId)
+        .then(r => r.json())
+        .then(data => {
+            const structure = data.structure || [];
+            document.getElementById('tree-viewer-content').innerHTML = renderTree(structure, 0);
+        })
+        .catch(() => {
+            document.getElementById('tree-viewer-content').innerHTML =
+                '<div class="alert alert-danger">Failed to load tree structure.</div>';
+        });
+}
+
+function renderTree(nodes, depth) {
+    if (!nodes || nodes.length === 0) return '';
+    let html = '<ul class="list-unstyled mb-0">';
+    nodes.forEach(node => {
+        const indent = depth * 16;
+        const hasChildren = node.nodes && node.nodes.length > 0;
+        const collapseId = 'node-' + (node.node_id || Math.random().toString(36).substr(2,6));
+        const pageRange = (node.start_index && node.end_index)
+            ? `<span class="badge bg-light text-dark border ms-2">pp. ${node.start_index}–${node.end_index}</span>`
+            : '';
+        html += `<li style="padding-left: ${indent}px;" class="mb-1">
+            ${hasChildren
+                ? `<span class="me-1" style="cursor:pointer;" data-bs-toggle="collapse" data-bs-target="#${collapseId}">▶</span>`
+                : '<span class="me-1 text-muted">•</span>'
+            }
+            <strong>${escHtml(node.title || 'Untitled')}</strong>
+            ${pageRange}
+            ${node.summary
+                ? `<br><small class="text-muted" style="padding-left:${indent + 16}px;">${escHtml(node.summary.slice(0, 120))}${node.summary.length > 120 ? '…' : ''}</small>`
+                : ''}
+            ${hasChildren
+                ? `<div class="collapse show" id="${collapseId}">${renderTree(node.nodes, depth + 1)}</div>`
+                : ''}
+        </li>`;
+    });
+    html += '</ul>';
+    return html;
+}
+
+function deleteDoc(docId) {
+    if (!confirm('Delete this PageIndex document? This cannot be undone.')) return;
+    fetch('/api/pageindex/documents/' + docId, { method: 'DELETE' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) loadPageIndexDocs();
+            else alert('Delete failed: ' + (data.error || 'unknown error'));
+        })
+        .catch(() => alert('Delete request failed.'));
+}
+
+function escHtml(str) {
+    if (!str) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+</script>
 {% endblock %}
