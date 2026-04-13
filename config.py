@@ -1,5 +1,5 @@
 """
-Configuration management for Enhanced SimpleRAG
+Configuration management for SimpleRAGx
 """
 
 import os

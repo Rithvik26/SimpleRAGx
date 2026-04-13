@@ -1,14 +1,14 @@
-# Enhanced SimpleRAG
+# SimpleRAGx
 
-A Dual-Mode Retrieval-Augmented Generation System with Normal and Graph RAG Capabilities
+RAGs and beyond — Normal, Graph, Neo4j, and PageIndex retrieval in one system
 
-![Enhanced SimpleRAG](https://via.placeholder.com/800x200?text=Enhanced%20SimpleRAG)
+![SimpleRAGx](https://via.placeholder.com/800x200?text=Enhanced%20SimpleRAG)
 
 ## Overview
 
-Enhanced SimpleRAG is an advanced document question-answering system that offers two powerful RAG modes: traditional semantic search and cutting-edge knowledge graph reasoning. Upload PDFs, DOCX, TXT, or HTML files and ask questions in natural language to get accurate, contextually-aware answers extracted directly from your content.
+SimpleRAGx is an advanced document question-answering system that offers two powerful RAG modes: traditional semantic search and cutting-edge knowledge graph reasoning. Upload PDFs, DOCX, TXT, or HTML files and ask questions in natural language to get accurate, contextually-aware answers extracted directly from your content.
 
-## ✨ What's New in Enhanced SimpleRAG
+## ✨ What's New in SimpleRAGx
 
 ### 🕸️ Graph RAG Mode
 - **Entity Extraction**: Automatically identifies people, organizations, concepts, locations, and events
@@ -40,7 +40,7 @@ Enhanced SimpleRAG is an advanced document question-answering system that offers
 
 ## Architecture
 
-Enhanced SimpleRAG employs a sophisticated dual-mode architecture:
+SimpleRAGx employs a sophisticated dual-mode architecture:
 
 ### Normal RAG Flow
 1. **Document Processing**: Parse and extract text from uploaded files
@@ -99,7 +99,7 @@ python simplerag.py config --gemini-key YOUR_GEMINI_API_KEY --claude-key YOUR_CL
 
 ### Web Interface
 
-Enhanced SimpleRAG provides an intuitive web interface with admin capabilities:
+SimpleRAGx provides an intuitive web interface with admin capabilities:
 
 ```bash
 # Start the web server
@@ -205,7 +205,7 @@ Access `/admin` for:
 
 ## API Endpoints
 
-Enhanced SimpleRAG provides RESTful API endpoints:
+SimpleRAGx provides RESTful API endpoints:
 
 ```bash
 # System status

@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 
-{% block title %}SimpleRAG - Home{% endblock %}
+{% block title %}SimpleRAGx - Home{% endblock %}
 
 {% block content %}
 <div class="jumbotron">
-    <h1 class="display-4">Enhanced SimpleRAG</h1>
-    <p class="lead">A Retrieval-Augmented Generation System with Normal and Graph RAG modes</p>
+    <h1 class="display-4">SimpleRAGx</h1>
+    <p class="lead">RAGs and beyond — Normal, Graph, Neo4j, and PageIndex retrieval modes</p>
     <hr class="my-4">
     
     {% if is_configured %}
@@ -28,7 +28,7 @@
             <a href="{{ url_for('query') }}" class="btn btn-outline-secondary btn-lg px-4">Ask Questions</a>
         </div>
     {% else %}
-        <p>Welcome to Enhanced SimpleRAG! To get started, you need to configure your API keys.</p>
+        <p>Welcome to SimpleRAGx! To get started, you need to configure your API keys.</p>
         <div class="d-grid gap-2 d-sm-flex justify-content-sm-center mt-4">
             <a href="{{ url_for('setup') }}" class="btn btn-primary btn-lg px-4">Configure System</a>
         </div>

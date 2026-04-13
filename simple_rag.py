@@ -1,5 +1,5 @@
 """
-Enhanced SimpleRAG - Main orchestrator class combining all services
+SimpleRAGx - Main orchestrator class combining all services
 """
 
 import os
@@ -23,7 +23,7 @@ from pageindex_service import PageIndexService
 logger = logging.getLogger(__name__)
 
 class EnhancedSimpleRAG:
-    """Enhanced SimpleRAG with both Normal and Graph RAG capabilities."""
+    """SimpleRAGx with both Normal and Graph RAG capabilities."""
     
     def __init__(self, config_manager: ConfigManager = None):
         """Initialize SimpleRAG with comprehensive error handling and service validation."""
@@ -78,7 +78,7 @@ class EnhancedSimpleRAG:
     
     def _initialize_services(self):
         """Initialize all services with comprehensive error handling."""
-        logger.info("Initializing Enhanced SimpleRAG services...")
+        logger.info("Initializing SimpleRAGx services...")
         
         # 1. Document Processor (should always work)
         try:
@@ -186,7 +186,7 @@ class EnhancedSimpleRAG:
                 logger.info(f"  WARNING: {warning}")
         
         if not self.initialization_errors:
-            logger.info(". Enhanced SimpleRAG initialized successfully")
+            logger.info(". SimpleRAGx initialized successfully")
     
     def is_ready(self) -> bool:
         """Check if SimpleRAG is ready for basic operations with connection retry."""
