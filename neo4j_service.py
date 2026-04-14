@@ -8,6 +8,8 @@ from typing import List, Dict, Any, Optional, Tuple
 import json
 from datetime import datetime
 
+import litellm
+
 from neo4j import GraphDatabase
 from neo4j.exceptions import Neo4jError, ServiceUnavailable
 
@@ -16,11 +18,12 @@ logger = logging.getLogger(__name__)
 class Neo4jService:
     """Service for interacting with Neo4j graph database."""
     
-    def __init__(self, uri: str, username: str, password: str):
+    def __init__(self, uri: str, username: str, password: str, database: str = None):
         """Initialize Neo4j connection."""
         self.uri = uri
-        self.username = username  
+        self.username = username
         self.password = password
+        self.database = database  # None uses the default database
         self.driver = None
         self._connect()
     
@@ -28,19 +31,25 @@ class Neo4jService:
         """Establish connection to Neo4j database."""
         try:
             self.driver = GraphDatabase.driver(
-                self.uri, 
+                self.uri,
                 auth=(self.username, self.password),
                 max_connection_lifetime=3600,
                 keep_alive=True
             )
             # Test connection
-            with self.driver.session() as session:
+            session_kwargs = {"database": self.database} if self.database else {}
+            with self.driver.session(**session_kwargs) as session:
                 session.run("RETURN 1")
             logger.info("Successfully connected to Neo4j database")
         except Exception as e:
             logger.error(f"Failed to connect to Neo4j: {e}")
             raise
     
+    def _session(self):
+        """Return a driver session, targeting the configured database if set."""
+        kwargs = {"database": self.database} if self.database else {}
+        return self.driver.session(**kwargs)
+
     def close(self):
         """Close database connection."""
         if self.driver:
@@ -50,7 +59,7 @@ class Neo4jService:
     def clear_graph(self) -> bool:
         """Clear all nodes and relationships from the graph."""
         try:
-            with self.driver.session() as session:
+            with self._session() as session:
                 # Delete all relationships first, then nodes
                 session.run("MATCH ()-[r]-() DELETE r")
                 session.run("MATCH (n) DELETE n")
@@ -69,7 +78,7 @@ class Neo4jService:
         ]
         
         try:
-            with self.driver.session() as session:
+            with self._session() as session:
                 for index in indexes:
                     session.run(index)
             logger.info("Indexes created successfully")
@@ -84,11 +93,13 @@ class Neo4jService:
         stats = {"entities_created": 0, "relationships_created": 0, "errors": 0}
         
         try:
-            with self.driver.session() as session:
+            with self._session() as session:
                 # Create document node if provided
                 if document_name:
                     session.run("""
-                        MERGE (d:Document {name: $doc_name, created_at: $timestamp})
+                        MERGE (d:Document {name: $doc_name})
+                        ON CREATE SET d.created_at = $timestamp
+                        ON MATCH SET d.updated_at = $timestamp
                         """, doc_name=document_name, timestamp=datetime.now().isoformat())
                 
                 # Store entities
@@ -172,106 +183,72 @@ class Neo4jService:
         
         session.run(query, **params)
     
-    def generate_cypher_from_question(self, question: str, llm_service) -> Tuple[str, str]:
-        """Generate Cypher query from natural language question using LLM - CASE INSENSITIVE VERSION."""
+    def generate_cypher_from_question(self, question: str, llm_service=None) -> Tuple[str, str]:
+        """Generate a Cypher query from a natural-language question.
+
+        Uses gemini/gemini-2.0-flash directly via LiteLLM — a cheap, non-thinking
+        model that reliably outputs a single short Cypher statement without
+        truncation or verbose explanation.
+        """
         schema_info = self.get_schema_info()
-        
-        prompt = f"""
-    You are a Neo4j Cypher query generator. Given a natural language question and database schema, generate a valid Cypher query.
 
-    DATABASE SCHEMA:
-    {schema_info}
+        # Strict single-task prompt — model must output ONLY the Cypher query.
+        prompt = (
+            "You are a Neo4j Cypher query generator.\n"
+            "Your ONLY job is to output a single valid Cypher query. "
+            "Do NOT include any explanation, markdown fences, comments, or extra text. "
+            "Output the Cypher query on one line and nothing else.\n\n"
+            "DATABASE SCHEMA:\n"
+            f"{schema_info}\n\n"
+            "RULES:\n"
+            "- Use toLower() + CONTAINS for all string comparisons (case-insensitive).\n"
+            "- Use MATCH … WHERE … RETURN … LIMIT 20.\n"
+            "- For relationship queries use: MATCH (a:Entity)-[r:RELATES_TO]->(b:Entity).\n"
+            "- Always RETURN relevant node/relationship properties.\n\n"
+            "EXAMPLES:\n"
+            "Question: Who founded TechCorp?\n"
+            "Query: MATCH (e:Entity)-[r:RELATES_TO]->(e2:Entity) WHERE toLower(r.relationship) CONTAINS 'found' OR toLower(r.relationship) CONTAINS 'co-found' OR toLower(r.relationship) CONTAINS 'ceo' RETURN e.name, e.type, e.description, r.relationship, e2.name LIMIT 20\n\n"
+            "Question: What are TechCorp's revenue figures?\n"
+            "Query: MATCH (e:Entity) WHERE toLower(e.description) CONTAINS 'revenue' OR toLower(e.description) CONTAINS 'million' RETURN e.name, e.type, e.description LIMIT 20\n\n"
+            "Question: What partnerships does TechCorp have?\n"
+            "Query: MATCH (e:Entity)-[r:RELATES_TO]->(e2:Entity) WHERE toLower(r.relationship) CONTAINS 'partner' OR toLower(r.description) CONTAINS 'partner' RETURN e.name, r.relationship, r.description, e2.name LIMIT 20\n\n"
+            "Question: What are the risk factors?\n"
+            "Query: MATCH (e:Entity) WHERE toLower(e.description) CONTAINS 'risk' OR toLower(e.description) CONTAINS 'threat' OR toLower(e.description) CONTAINS 'challenge' RETURN e.name, e.type, e.description LIMIT 20\n\n"
+            "Question: What products or technologies does TechCorp have?\n"
+            "Query: MATCH (e:Entity) WHERE e.type IN ['PRODUCT', 'TECHNOLOGY'] OR toLower(e.description) CONTAINS 'product' OR toLower(e.description) CONTAINS 'platform' RETURN e.name, e.type, e.description LIMIT 20\n\n"
+            f"Question: {question}\n"
+            "Query:"
+        )
 
-    IMPORTANT RULES:
-    1. ALWAYS use case-insensitive matching with toLower() for name comparisons
-    2. Use CONTAINS for partial matching instead of exact equality when searching names
-    3. Use MATCH, WHERE, RETURN patterns
-    4. Limit results to 20 unless specifically asked for more
-    5. For entity searches, match on name or description using toLower()
-    6. For relationship queries, traverse the graph appropriately
-    7. Always include node properties in RETURN when relevant
-
-    EXAMPLES:
-    Question: "What is TechCorp about?"
-    Cypher: MATCH (e:Entity) WHERE toLower(e.name) CONTAINS toLower('TechCorp') RETURN e.name, e.type, e.description LIMIT 20
-
-    Question: "What entities are related to TechCorp?"
-    Cypher: MATCH (e1:Entity)-[r:RELATES_TO]-(e2:Entity) WHERE toLower(e1.name) CONTAINS toLower('TechCorp') RETURN e1.name, r.relationship, e2.name, e2.type LIMIT 20
-
-    Question: "Show me all companies and their relationships"
-    Cypher: MATCH (e1:Entity {{type: 'ORGANIZATION'}})-[r:RELATES_TO]-(e2:Entity) RETURN e1.name, r.relationship, e2.name, e2.type LIMIT 20
-
-    Question: "Tell me about Microsoft"
-    Cypher: MATCH (e:Entity) WHERE toLower(e.name) CONTAINS toLower('Microsoft') RETURN e.name, e.type, e.description LIMIT 20
-
-    QUESTION: {question}
-
-    Generate only the Cypher query, no explanation. Use case-insensitive matching:
-    """
-        
         try:
-            # Use generate_answer method
-            response = llm_service.generate_answer(prompt, [])
-            
-            # Alternative: use internal method if available
-            if hasattr(llm_service, '_generate_with_llm'):
-                response = llm_service._generate_with_llm(prompt)
-            
-            cypher_query = response.strip()
-            
-            # Clean up the response (remove any markdown formatting)
-            if cypher_query.startswith("```"):
-                lines = cypher_query.split("\n")
-                if lines[0].startswith("```") and lines[-1].startswith("```"):
-                    cypher_query = "\n".join(lines[1:-1])
-            
-            # Additional cleanup
+            resp = litellm.completion(
+                model="gemini/gemini-2.5-flash-lite",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=256,
+            )
+            cypher_query = resp.choices[0].message.content.strip()
+
+            # Strip any markdown fences the model may still add
             cypher_query = cypher_query.replace("```cypher", "").replace("```", "").strip()
-            
-            # Validate basic Cypher syntax
-            if not any(keyword in cypher_query.upper() for keyword in ["MATCH", "RETURN"]):
-                logger.warning(f"Generated query might be invalid: {cypher_query}")
-                
-                # Fallback: Generate a simple case-insensitive query ourselves
-                # Extract the main entity from the question
-                import re
-                entities = re.findall(r'\b[A-Z][a-zA-Z]+\b', question)
-                if entities:
-                    entity_name = entities[0]
-                    cypher_query = f"""
-                    MATCH (e:Entity) 
-                    WHERE toLower(e.name) CONTAINS toLower('{entity_name}')
-                    RETURN e.name, e.type, e.description
-                    LIMIT 20
-                    """.strip()
-                    logger.info(f"Used fallback query for entity: {entity_name}")
-            
-            logger.info(f"Generated Cypher query: {cypher_query}")
+            # Take only the first line if the model output multiple lines
+            cypher_query = cypher_query.splitlines()[0].strip()
+
+            if not any(kw in cypher_query.upper() for kw in ("MATCH", "RETURN")):
+                logger.warning(f"LLM returned unexpected Cypher output: {cypher_query!r}")
+                return "", f"LLM did not return a valid Cypher query: {cypher_query!r}"
+
+            logger.info(f"LLM-generated Cypher: {cypher_query}")
             return cypher_query, ""
-            
+
         except Exception as e:
             logger.error(f"Error generating Cypher query: {e}")
-            
-            # Last resort: try to extract entity name and create basic query
-            import re
-            entities = re.findall(r'\b[A-Z][a-zA-Z]+\b', question)
-            if entities:
-                entity_name = entities[0]
-                fallback_query = f"""
-                MATCH (e:Entity) 
-                WHERE toLower(e.name) CONTAINS toLower('{entity_name}')
-                RETURN e.name, e.type, e.description
-                LIMIT 20
-                """.strip()
-                logger.info(f"Using emergency fallback query for: {entity_name}")
-                return fallback_query, ""
-            
             return "", f"Error generating query: {str(e)}"
     
     def execute_cypher_query(self, cypher_query: str) -> Tuple[List[Dict], str]:
         """Execute Cypher query and return results - FIXED."""
         try:
-            with self.driver.session() as session:
+            with self._session() as session:
                 result = session.run(cypher_query)
                 records = []
                 
@@ -329,7 +306,7 @@ class Neo4jService:
     def get_schema_info(self) -> str:
         """Get database schema information for LLM context."""
         try:
-            with self.driver.session() as session:
+            with self._session() as session:
                 # Get node labels and their properties
                 node_info = session.run("""
                     CALL db.labels() YIELD label
@@ -372,7 +349,7 @@ SAMPLE DATA STRUCTURE:
     def get_graph_stats(self) -> Dict[str, int]:
         """Get basic statistics about the graph."""
         try:
-            with self.driver.session() as session:
+            with self._session() as session:
                 stats = session.run("""
                     MATCH (n:Entity) 
                     OPTIONAL MATCH ()-[r:RELATES_TO]->()
@@ -391,7 +368,7 @@ SAMPLE DATA STRUCTURE:
     def search_entities_by_name(self, name_query: str, limit: int = 10) -> List[Dict]:
         """Search entities by name similarity."""
         try:
-            with self.driver.session() as session:
+            with self._session() as session:
                 results = session.run("""
                     MATCH (e:Entity)
                     WHERE toLower(e.name) CONTAINS toLower($query)
@@ -411,9 +388,10 @@ def create_neo4j_service(config: Dict[str, str]) -> Optional[Neo4jService]:
     """Create Neo4j service from configuration."""
     try:
         service = Neo4jService(
-            uri=config["NEO4J_URI"],
-            username=config["NEO4J_USERNAME"], 
-            password=config["NEO4J_PASSWORD"]
+            uri=config.get("NEO4J_URI", config.get("neo4j_uri", "")),
+            username=config.get("NEO4J_USERNAME", config.get("neo4j_username", "neo4j")),
+            password=config.get("NEO4J_PASSWORD", config.get("neo4j_password", "")),
+            database=config.get("NEO4J_DATABASE", config.get("neo4j_database", None))
         )
         service.create_indexes()
         return service

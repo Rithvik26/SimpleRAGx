@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 # Enhanced default configuration with Graph RAG options
 DEFAULT_CONFIG = {
     "gemini_api_key": "",  # Remove os.environ.get
-    "claude_api_key": "",  # Remove os.environ.get
     "qdrant_url": "",      # Remove hardcoded URL
     "qdrant_api_key": "",  # Remove os.environ.get
     "collection_name": "simple_rag_docs",  # Keep default name
@@ -22,7 +21,7 @@ DEFAULT_CONFIG = {
     "chunk_size": 1000,
     "chunk_overlap": 200,
     "top_k": 5,
-    "preferred_llm": "claude",
+    "preferred_llm": "gemini",
     "rag_mode": "normal",
     "rate_limit": 60,
     "enable_cache": True,
@@ -131,7 +130,6 @@ class ConfigManager:
         """Apply environment variable overrides."""
         env_overrides = {
             "gemini_api_key": "GEMINI_API_KEY",
-            "claude_api_key": "CLAUDE_API_KEY", 
             "qdrant_api_key": "QDRANT_API_KEY",
             "qdrant_url": "QDRANT_URL",
             "collection_name": "QDRANT_COLLECTION",
@@ -198,7 +196,7 @@ class ConfigManager:
                 validation_result["valid"] = False
         
         # Check optional but recommended keys
-        recommended_keys = ["claude_api_key", "qdrant_api_key", "qdrant_url"]
+        recommended_keys = ["qdrant_api_key", "qdrant_url"]
         for key in recommended_keys:
             if not self.config.get(key):
                 validation_result["warnings"].append(f"Missing recommended configuration: {key}")
@@ -249,8 +247,8 @@ class ConfigManager:
             validation_result["errors"].append("rag_mode must be 'normal', 'graph', 'neo4j', 'hybrid_neo4j', or 'pageindex'")
             validation_result["valid"] = False
         
-        if self.config.get("preferred_llm") not in ["claude", "raw"]:
-            validation_result["errors"].append("preferred_llm must be 'claude' or 'raw'")
+        if self.config.get("preferred_llm") not in ["gemini", "raw"]:
+            validation_result["errors"].append("preferred_llm must be 'gemini' or 'raw'")
             validation_result["valid"] = False
         
         return validation_result

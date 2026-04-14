@@ -21,13 +21,6 @@
             </div>
             
             <div class="mb-3">
-                <label for="claude_api_key" class="form-label">Claude API Key</label>
-                <input type="password" class="form-control" id="claude_api_key" name="claude_api_key" 
-                       value="{{ config.claude_api_key }}">
-                <div class="form-text">Required if using Claude LLM. Get a key from <a href="https://anthropic.com/" target="_blank">Anthropic</a>.</div>
-            </div>
-            
-            <div class="mb-3">
                 <label for="qdrant_api_key" class="form-label">Qdrant API Key</label>
                 <input type="password" class="form-control" id="qdrant_api_key" name="qdrant_api_key" 
                        value="{{ config.qdrant_api_key }}">
@@ -135,12 +128,12 @@
             <div class="mb-3">
                 <label class="form-label">Preferred LLM</label>
                 <div class="form-check">
-                    <input class="form-check-input" type="radio" name="preferred_llm" id="claude" value="claude" 
-                           {% if config.preferred_llm == 'claude' %}checked{% endif %}>
-                    <label class="form-check-label" for="claude">Claude</label>
+                    <input class="form-check-input" type="radio" name="preferred_llm" id="gemini" value="gemini"
+                           {% if config.preferred_llm != 'raw' %}checked{% endif %}>
+                    <label class="form-check-label" for="gemini">Gemini (gemini-2.5-flash)</label>
                 </div>
                 <div class="form-check">
-                    <input class="form-check-input" type="radio" name="preferred_llm" id="raw" value="raw" 
+                    <input class="form-check-input" type="radio" name="preferred_llm" id="raw" value="raw"
                            {% if config.preferred_llm == 'raw' %}checked{% endif %}>
                     <label class="form-check-label" for="raw">Raw Results (No LLM)</label>
                 </div>

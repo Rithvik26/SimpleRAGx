@@ -24,7 +24,7 @@ except ImportError:
 from langchain.tools import Tool
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.prompts import PromptTemplate
-from langchain_anthropic import ChatAnthropic
+from langchain_google_genai import ChatGoogleGenerativeAI
 from extensions import ProgressTracker
 
 logger = logging.getLogger(__name__)
@@ -40,23 +40,18 @@ class AgenticRAGService:
         self.config = config
         self.simple_rag = simple_rag_instance
         
-        # Initialize LangChain LLM - use same model as your working LLM service
+        # Initialize LangChain LLM using Gemini
         self.llm = None
-        if config.get("claude_api_key"):
+        if config.get("gemini_api_key"):
             try:
-                # FIXED: Use current working Claude model
-                model = "claude-3-haiku-20240307"  # Fast and reliable model that works
-                
-                self.llm = ChatAnthropic(
-                    api_key=config["claude_api_key"],
-                    model=model,
+                self.llm = ChatGoogleGenerativeAI(
+                    google_api_key=config["gemini_api_key"],
+                    model="gemini-2.0-flash",
                     temperature=0.1,
-                    timeout=30,  # Add timeout
-                    max_retries=2  # Limit retries
                 )
-                logger.info(f"LangChain Claude LLM initialized with model: {model}")
+                logger.info("LangChain Gemini LLM initialized with model: gemini-2.0-flash")
             except Exception as e:
-                logger.error(f"Failed to initialize LangChain LLM: {e}")
+                logger.error(f"Failed to initialize LangChain Gemini LLM: {e}")
         
         # Create tools that wrap your existing RAG functionality
         self.tools = self._create_tools()
@@ -310,7 +305,7 @@ VERIFICATION STATUS: Based on available evidence in the knowledge base."""
         """
         if not self.is_available():
             return {
-                "answer": "Agentic AI service not available. Please check Claude API configuration.",
+                "answer": "Agentic AI service not available. Please check Gemini API configuration.",
                 "reasoning_steps": [],
                 "tools_used": [],
                 "success": False
