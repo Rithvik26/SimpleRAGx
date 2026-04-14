@@ -26,7 +26,7 @@ def setup_argument_parser():
         epilog="""
 Examples:
   # Configure API keys
-  python cli.py config --gemini-key YOUR_GEMINI_KEY --claude-key YOUR_CLAUDE_KEY
+  python cli.py config --gemini-key YOUR_GEMINI_KEY
   
   # Set RAG mode
   python cli.py mode graph
@@ -47,10 +47,9 @@ Examples:
     # Config command
     config_parser = subparsers.add_parser("config", help="Configure API keys and settings")
     config_parser.add_argument("--gemini-key", help="Set Gemini API key")
-    config_parser.add_argument("--claude-key", help="Set Claude API key")
     config_parser.add_argument("--qdrant-key", help="Set Qdrant API key")
     config_parser.add_argument("--qdrant-url", help="Set Qdrant URL")
-    config_parser.add_argument("--preferred-llm", choices=["claude", "raw"], help="Set preferred LLM")
+    config_parser.add_argument("--preferred-llm", choices=["gemini", "raw"], help="Set preferred LLM")
     config_parser.add_argument("--rag-mode", choices=["normal", "graph"], help="Set default RAG mode")
     config_parser.add_argument("--chunk-size", type=int, help="Set chunk size")
     config_parser.add_argument("--chunk-overlap", type=int, help="Set chunk overlap")
@@ -118,8 +117,6 @@ def handle_config_command(args):
     updates = {}
     if args.gemini_key:
         updates["gemini_api_key"] = args.gemini_key
-    if args.claude_key:
-        updates["claude_api_key"] = args.claude_key
     if args.qdrant_key:
         updates["qdrant_api_key"] = args.qdrant_key
     if args.qdrant_url:

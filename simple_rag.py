@@ -5,6 +5,7 @@ SimpleRAGx - Main orchestrator class combining all services
 import os
 import sys
 import time
+import json
 import logging
 from typing import List, Dict, Any, Optional
 
@@ -16,7 +17,14 @@ from graph_rag_service import GraphRAGService
 from document_processor import DocumentProcessor
 from llm_service import LLMService
 from extensions import ProgressTracker
-from agentic_service import AgenticRAGService
+try:
+    from agentic_service import AgenticRAGService
+    _AGENTIC_AVAILABLE = True
+except (ImportError, ModuleNotFoundError) as _e:
+    import logging as _logging
+    _logging.getLogger(__name__).warning(f"AgenticRAGService unavailable (LangChain version mismatch): {_e}")
+    AgenticRAGService = None
+    _AGENTIC_AVAILABLE = False
 from neo4j_service import Neo4jService
 from pageindex_service import PageIndexService
 
@@ -61,7 +69,7 @@ class EnhancedSimpleRAG:
 
         # 6. Agentic AI Service (after all other services are ready)
         try:
-            if self.is_ready():  # Only initialize if basic services are ready
+            if self.is_ready() and AgenticRAGService is not None:  # Only initialize if basic services are ready
                 self.agentic_service = AgenticRAGService(self.config, self)
                 logger.info(" Agentic AI service initialized")
             else:
@@ -125,16 +133,8 @@ class EnhancedSimpleRAG:
         # 4. LLM Service
         try:
             self.llm_service = LLMService(self.config)
-            
-            if self.config.get("preferred_llm") == "claude":
-                # Test Claude connection if configured
-                if self.config.get("claude_api_key"):
-                    test_result = self.llm_service.test_connection()
-                    if not test_result.get("service_available"):
-                        self.initialization_warnings.append(f"Claude API test failed: {test_result.get('error')}")
-                else:
-                    self.initialization_warnings.append("Claude API key not configured")
-            
+            if not self.llm_service.is_available():
+                self.initialization_warnings.append("Gemini API key not configured — LLM answers unavailable")
             logger.info(". LLM service initialized")
         except Exception as e:
             error_msg = f"Failed to initialize LLM service: {str(e)}"
@@ -1147,24 +1147,26 @@ class EnhancedSimpleRAG:
                 progress_tracker.update(80, 100, status="formatting", 
                                     message="Formatting results")
             
-            if not results:
-                return "No results found in the Neo4j database for your query."
-            
+            # Build context — match benchmark pattern (empty results still go to LLM)
+            context = json.dumps(results, indent=2) if results else "(no matching entities found in graph)"
+
             # Use LLM to generate a natural language answer if available
             if self.llm_service and self.llm_service.is_available():
-                prompt = f"""Based on the following Neo4j query results, provide a clear and comprehensive answer to the user's question.
+                prompt = f"""Answer the following question based ONLY on the provided Neo4j graph query results. Be concise and precise.
 
-    Question: {question}
+Question: {question}
 
-    Neo4j Query Results:
-    {json.dumps(results, indent=2)}
+Neo4j Query Results:
+{context}
 
-    Please provide a natural language answer that explains the findings clearly:"""
-                
-                answer = self.llm_service._generate_with_llm(prompt)
+Answer:"""
+                answer = self.llm_service._generate_with_gemini(prompt)
             else:
                 # Format raw results
-                answer = self._format_neo4j_results(results, cypher_query)
+                if not results:
+                    answer = "No results found in the Neo4j database for your query."
+                else:
+                    answer = self._format_neo4j_results(results, cypher_query)
             
             if progress_tracker:
                 progress_tracker.update(100, 100, status="complete", 
@@ -1370,7 +1372,7 @@ class EnhancedSimpleRAG:
             else:
                 self.initialization_warnings.append(
                     "PageIndex service not ready — install pageindex package "
-                    "and set claude_api_key or gemini_api_key"
+                    "and set gemini_api_key"
                 )
         except Exception as e:
             self.initialization_warnings.append(f"PageIndex init warning: {e}")
@@ -1440,7 +1442,7 @@ class EnhancedSimpleRAG:
         if mode == "pageindex" and not self.is_pageindex_ready():
             raise RuntimeError(
                 "PageIndex mode not available — install the pageindex package "
-                "and set claude_api_key or gemini_api_key"
+                "and set gemini_api_key"
             )
 
         old_mode = self.rag_mode

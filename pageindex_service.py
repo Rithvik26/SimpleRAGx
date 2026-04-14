@@ -737,16 +737,12 @@ class PageIndexService:
     def _resolve_model(self) -> str:
         """
         Pick the best available LiteLLM model path based on configured API keys.
-        Priority: Claude → Gemini → OpenAI env var.
+        Priority: Gemini → OpenAI env var.
         """
         # User may explicitly set a model in config
         explicit = self.config.get("pageindex_model", "").strip()
         if explicit:
             return explicit
-
-        if self.config.get("claude_api_key"):
-            os.environ.setdefault("ANTHROPIC_API_KEY", self.config["claude_api_key"])
-            return CLAUDE_MODEL
 
         if self.config.get("gemini_api_key"):
             os.environ.setdefault("GEMINI_API_KEY", self.config["gemini_api_key"])
@@ -756,7 +752,7 @@ class PageIndexService:
             return OPENAI_MODEL
 
         logger.warning(
-            "No LLM API key found for PageIndex. Set claude_api_key or gemini_api_key."
+            "No LLM API key found for PageIndex. Set gemini_api_key in config."
         )
         return ""
 
