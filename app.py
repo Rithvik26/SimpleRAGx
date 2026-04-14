@@ -348,7 +348,6 @@ def setup():
         # Get form data
         form_data = {
             "gemini_api_key": request.form.get('gemini_api_key', '').strip(),
-            "claude_api_key": request.form.get('claude_api_key', '').strip(),
             "qdrant_api_key": request.form.get('qdrant_api_key', '').strip(),
             "qdrant_url": request.form.get('qdrant_url', '').strip(),
             "preferred_llm": request.form.get('preferred_llm', ''),
@@ -640,14 +639,14 @@ def upload():
             if not simplerag_instance or not simplerag_instance.is_pageindex_ready():
                 flash(
                     'PageIndex is not available. Install the pageindex package and '
-                    'set claude_api_key or gemini_api_key.',
+                    'set gemini_api_key.',
                     'danger'
                 )
                 return redirect(url_for('setup'))
 
             config = get_config_manager().get_all()
-            if not (config.get("claude_api_key") or config.get("gemini_api_key")):
-                flash('PageIndex requires claude_api_key or gemini_api_key.', 'danger')
+            if not config.get("gemini_api_key"):
+                flash('PageIndex requires gemini_api_key.', 'danger')
                 return redirect(url_for('setup'))
 
             try:
@@ -830,7 +829,7 @@ def query():
             if not simplerag_instance or not simplerag_instance.is_pageindex_ready():
                 flash(
                     'PageIndex is not available. Install the pageindex package and '
-                    'set claude_api_key or gemini_api_key.',
+                    'set gemini_api_key.',
                     'danger'
                 )
                 return render_template('query.html', question=question,
@@ -1215,7 +1214,6 @@ def system_status():
             "current_rag_mode": status['rag_mode'],
             "api_keys_configured": {
                 "gemini": bool(config.get("gemini_api_key")),
-                "claude": bool(config.get("claude_api_key")),
                 "qdrant": bool(config.get("qdrant_api_key"))
             },
             "services": status['services'],
@@ -1223,7 +1221,7 @@ def system_status():
             "initialization_warnings": status['initialization_warnings'],
             "config": {
                 "rag_mode": config.get("rag_mode", "normal"),
-                "preferred_llm": config.get("preferred_llm", "claude"),
+                "preferred_llm": config.get("preferred_llm", "gemini"),
                 "chunk_size": config.get("chunk_size", 1000),
                 "top_k": config.get("top_k", 5)
             },
