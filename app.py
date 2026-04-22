@@ -191,61 +191,48 @@ def process_parallel_queries(question: str, session_id: str) -> Dict[str, Any]:
         """Run query in a specific mode and measure time."""
         start_time = time.time()
         try:
+            # Availability checks (read-only, no lock needed)
+            if mode == 'hybrid_neo4j':
+                if not simplerag_instance.is_graph_ready():
+                    return (mode, None, time.time() - start_time, "Graph RAG not available for hybrid mode")
+                if not simplerag_instance.is_neo4j_ready():
+                    return (mode, None, time.time() - start_time, "Neo4j not available for hybrid mode")
+            elif mode == 'graph':
+                if not simplerag_instance.is_graph_ready():
+                    return (mode, None, time.time() - start_time, "Graph RAG not initialized")
+            elif mode == 'pageindex':
+                if not simplerag_instance.is_pageindex_ready():
+                    return (mode, None, time.time() - start_time, "PageIndex not available")
+
+            # Each mode queries its own service directly — no shared mode state
+            if mode == 'pageindex':
+                result = simplerag_instance.query_pageindex(question, session_id=f"{session_id}_{mode}")
+                answer = result.get("answer") if result.get("success") else None
+                if not answer:
+                    return (mode, None, time.time() - start_time, result.get("error", "PageIndex query failed"))
+            else:
+                # Set + query atomically under lock so threads don't stomp each other's mode
+                with mode_lock:
+                    simplerag_instance.set_rag_mode(mode)
+                    answer = simplerag_instance.query(question, f"{session_id}_{mode}")
+
             with mode_lock:
-                # Save original mode
-                original_mode = simplerag_instance.rag_mode
-                
-                # Check availability for special modes BEFORE setting mode
-                if mode == 'hybrid_neo4j':
-                    if not simplerag_instance.is_graph_ready():
-                        elapsed_time = time.time() - start_time
-                        return (mode, None, elapsed_time, "Graph RAG not available for hybrid mode")
-                    if not simplerag_instance.is_neo4j_ready():
-                        elapsed_time = time.time() - start_time
-                        return (mode, None, elapsed_time, "Neo4j not available for hybrid mode")
-                elif mode == 'graph':
-                    if not simplerag_instance.is_graph_ready():
-                        elapsed_time = time.time() - start_time
-                        return (mode, None, elapsed_time, "Graph RAG not initialized")
-                elif mode == 'pageindex':
-                    if not simplerag_instance.is_pageindex_ready():
-                        elapsed_time = time.time() - start_time
-                        return (mode, None, elapsed_time, "PageIndex not available")
-                
-                # Set mode temporarily
-                simplerag_instance.set_rag_mode(mode)
-            
-            # Run query (outside lock to allow parallel execution)
-            # FIXED: Just use the standard query method for all modes
-            answer = simplerag_instance.query(question, f"{session_id}_{mode}")
-            
-            with mode_lock:
-                # Restore original mode
-                simplerag_instance.set_rag_mode(original_mode)
-                
-                # Update progress
-                completed_modes['count'] += 1
-                if progress_tracker:
-                    progress = 20 + (completed_modes['count'] * 20)  # 20-80%
-                    progress_tracker.update(progress, 100, status="processing", 
-                                        message=f"Completed {mode} mode ({completed_modes['count']}/3)")
-        
-            elapsed_time = time.time() - start_time
-            return (mode, answer, elapsed_time, None)
-            
-        except Exception as e:
-            with mode_lock:
-                # Restore original mode on error
-                try:
-                    simplerag_instance.set_rag_mode(original_mode)
-                except:
-                    pass
-                    
                 completed_modes['count'] += 1
                 if progress_tracker:
                     progress = 20 + (completed_modes['count'] * 20)
-                    progress_tracker.update(progress, 100, status="processing", 
-                                        message=f"Error in {mode} mode ({completed_modes['count']}/3)")
+                    progress_tracker.update(progress, 100, status="processing",
+                                            message=f"Completed {mode} mode ({completed_modes['count']}/4)")
+
+            elapsed_time = time.time() - start_time
+            return (mode, answer, elapsed_time, None)
+
+        except Exception as e:
+            with mode_lock:
+                completed_modes['count'] += 1
+                if progress_tracker:
+                    progress = 20 + (completed_modes['count'] * 20)
+                    progress_tracker.update(progress, 100, status="processing",
+                                            message=f"Error in {mode} mode ({completed_modes['count']}/4)")
                     
             elapsed_time = time.time() - start_time
             logger.error(f"Error in {mode} mode: {e}")
