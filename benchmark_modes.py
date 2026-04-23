@@ -12,15 +12,23 @@ Usage:
 import os, sys, time, json, textwrap
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-GEMINI_KEY = "AIzaSyAnd5ob8CZiLtMXaiWrJIEsIvKkjbZrO6k"
-QDRANT_URL = "https://42101fde-47fd-4914-9f7b-ab368688ea6a.us-west-1-0.aws.cloud.qdrant.io:6333"
-QDRANT_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.xI04VRfVUYaFAFWhDcDbhtmvowDE8-cw8hqpSFYnEkc"
-NEO4J_URI  = "neo4j+s://4521331b.databases.neo4j.io"
-NEO4J_USER = "4521331b"
-NEO4J_PASS = "0DHBg5-AAGRY3QU_0qKlQVawJFUWhFS00ig-2u2fVvU"
-NEO4J_DB   = "4521331b"
+def _require_env(key: str) -> str:
+    val = os.environ.get(key)
+    if not val:
+        raise EnvironmentError(
+            f"Required environment variable {key!r} is not set. "
+            "Copy .env.example to .env, fill in your values, and run: "
+            "  export $(grep -v '^#' .env | xargs)"
+        )
+    return val
 
-os.environ["GEMINI_API_KEY"] = GEMINI_KEY
+GEMINI_KEY = _require_env("GEMINI_API_KEY")
+QDRANT_URL = _require_env("QDRANT_URL")
+QDRANT_KEY = _require_env("QDRANT_API_KEY")
+NEO4J_URI  = _require_env("NEO4J_URI")
+NEO4J_USER = _require_env("NEO4J_USER")
+NEO4J_PASS = _require_env("NEO4J_PASSWORD")
+NEO4J_DB   = os.environ.get("NEO4J_DATABASE", "neo4j")
 
 TEST_PDF = os.path.join(os.path.dirname(os.path.abspath(__file__)), "techcorp_q1_2025_report.pdf")
 PI_WORKSPACE = "/tmp/pi_bench_ws"

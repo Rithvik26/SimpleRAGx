@@ -16,7 +16,9 @@ Usage:
 import os, sys, json, time, textwrap
 
 # ── 0. Inject the Gemini key before anything imports litellm ─────────────────
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyAnd5ob8CZiLtMXaiWrJIEsIvKkjbZrO6k")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+if not GEMINI_API_KEY:
+    raise EnvironmentError("GEMINI_API_KEY is not set. See .env.example.")
 os.environ["GEMINI_API_KEY"] = GEMINI_API_KEY
 
 # Add the project root to sys.path so local modules resolve correctly
