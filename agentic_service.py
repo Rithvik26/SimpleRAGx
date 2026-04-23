@@ -7,18 +7,24 @@ import logging
 import json
 from typing import List, Dict, Any, Optional, Callable
 
-# Handle different LangChain versions
-try:
-    # LangChain >= 0.2.0 - newest structure
-    from langchain.agents import create_react_agent, AgentExecutor
-except ImportError:
+def _import_langchain_agent():
+    """Import AgentExecutor and create_react_agent across LangChain versions."""
     try:
-        # LangChain 0.1.x - intermediate structure  
+        from langchain.agents import create_react_agent, AgentExecutor
+        return AgentExecutor, create_react_agent
+    except ImportError:
+        pass
+    try:
         from langchain.agents.react.agent import create_react_agent
         from langchain.agents.agent import AgentExecutor
+        return AgentExecutor, create_react_agent
     except ImportError:
-        # LangChain < 0.1.0 - legacy structure
-        from langchain.agents import AgentExecutor, create_react_agent
+        raise ImportError(
+            "LangChain not found. Install with: pip install 'langchain>=0.1.0,<0.3.0'"
+        )
+
+
+AgentExecutor, create_react_agent = _import_langchain_agent()
 
 
 from langchain.tools import Tool
@@ -154,17 +160,18 @@ Thought: {agent_scratchpad}""")
             # Create the ReAct agent
             self.agent = create_react_agent(self.llm, self.tools, prompt)
             
-            # FIXED: Create agent executor with better limits and error handling
+            max_iter = self.config.get("agentic_max_iterations", 5)
             self.agent_executor = AgentExecutor(
                 agent=self.agent,
                 tools=self.tools,
                 verbose=True,
-                max_iterations=3,  # FIXED: Reduced from 5 to 3 to prevent loops
-                max_execution_time=60,  # FIXED: Add time limit (60 seconds)
+                max_iterations=max_iter,
+                max_execution_time=60,
                 return_intermediate_steps=True,
                 handle_parsing_errors=True,
-                early_stopping_method="generate"  # FIXED: Stop early if possible
+                early_stopping_method="generate",
             )
+            logger.info(f"LangChain ReAct agent initialized (max_iterations={max_iter})")
             
             logger.info("LangChain ReAct agent initialized successfully with strict limits")
             
@@ -398,7 +405,8 @@ VERIFICATION STATUS: Based on available evidence in the knowledge base."""
                 error_msg = "The agent had trouble understanding the response format. Please try rephrasing your question."
             elif "timeout" in str(e).lower() or "time" in str(e).lower():
                 error_msg = "The query took too long to process. Please try a simpler question or break it into smaller parts."
-            elif "iteration" in str(e).lower():
+            elif "iteration" in str(e).lower() or "max_iterations" in str(e).lower():
+                logger.warning("Agentic mode hit iteration cap")
                 error_msg = "The agent reached its thinking limit. Please try asking a more specific question."
             else:
                 error_msg = f"Error in agentic processing: {str(e)}"
@@ -428,15 +436,23 @@ VERIFICATION STATUS: Based on available evidence in the knowledge base."""
         ]
     
     def get_agentic_stats(self) -> Dict[str, Any]:
-        """Get statistics about the agentic service."""
-        return {
-            "service_available": self.is_available(),
-            "llm_configured": self.llm is not None,
-            "agent_initialized": self.agent_executor is not None,
-            "tools_count": len(self.tools),
-            "available_tools": [tool.name for tool in self.tools],
-            "underlying_rag_ready": self.simple_rag.is_ready() if self.simple_rag else False,
-            "graph_rag_ready": self.simple_rag.is_graph_ready() if self.simple_rag else False,
-            "max_iterations": 3,  # FIXED: Show the limit
-            "max_execution_time": 60  # FIXED: Show the time limit
-        }
+        """Get statistics about the agentic service. Safe to call even if init failed."""
+        try:
+            executor = getattr(self, "agent_executor", None)
+            max_iter = getattr(executor, "max_iterations", None) if executor else None
+            tools = getattr(self, "tools", [])
+            simple_rag = getattr(self, "simple_rag", None)
+            return {
+                "service_available": self.is_available(),
+                "llm_configured": getattr(self, "llm", None) is not None,
+                "agent_initialized": executor is not None,
+                "tools_count": len(tools),
+                "available_tools": [t.name for t in tools],
+                "underlying_rag_ready": simple_rag.is_ready() if simple_rag else False,
+                "graph_rag_ready": simple_rag.is_graph_ready() if simple_rag else False,
+                "max_iterations": max_iter or self.config.get("agentic_max_iterations", 5),
+                "max_execution_time": 60,
+            }
+        except Exception as e:
+            logger.warning(f"get_agentic_stats failed: {e}")
+            return {"service_available": False, "error": str(e)}
