@@ -15,6 +15,11 @@ from neo4j.exceptions import Neo4jError, ServiceUnavailable
 
 logger = logging.getLogger(__name__)
 
+
+class CypherGenerationError(Exception):
+    """Raised when LLM-generated Cypher cannot be validated after one retry."""
+
+
 class Neo4jService:
     """Service for interacting with Neo4j graph database."""
     
@@ -191,6 +196,29 @@ class Neo4jService:
         
         session.run(query, **params)
     
+    def _validate_cypher(self, cypher: str) -> Tuple[bool, Optional[str]]:
+        """Run EXPLAIN on cypher in a read-only tx. Returns (valid, error_or_None)."""
+        try:
+            with self._session() as session:
+                session.run(f"EXPLAIN {cypher}").consume()
+            return True, None
+        except Neo4jError as e:
+            return False, str(e)
+        except Exception as e:
+            return False, str(e)
+
+    def _call_cypher_llm(self, prompt: str) -> str:
+        """Single LLM call to gemini-2.5-flash-lite; returns stripped Cypher text."""
+        resp = litellm.completion(
+            model="gemini/gemini-2.5-flash-lite",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=256,
+        )
+        cypher = resp.choices[0].message.content.strip()
+        cypher = cypher.replace("```cypher", "").replace("```", "").strip()
+        return cypher.splitlines()[0].strip()
+
     def generate_cypher_from_question(self, question: str, llm_service=None) -> Tuple[str, str]:
         """Generate a Cypher query from a natural-language question.
 
@@ -229,26 +257,33 @@ class Neo4jService:
         )
 
         try:
-            resp = litellm.completion(
-                model="gemini/gemini-2.5-flash-lite",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-                max_tokens=256,
-            )
-            cypher_query = resp.choices[0].message.content.strip()
-
-            # Strip any markdown fences the model may still add
-            cypher_query = cypher_query.replace("```cypher", "").replace("```", "").strip()
-            # Take only the first line if the model output multiple lines
-            cypher_query = cypher_query.splitlines()[0].strip()
+            cypher_query = self._call_cypher_llm(prompt)
 
             if not any(kw in cypher_query.upper() for kw in ("MATCH", "RETURN")):
                 logger.warning(f"LLM returned unexpected Cypher output: {cypher_query!r}")
                 return "", f"LLM did not return a valid Cypher query: {cypher_query!r}"
 
-            logger.info(f"LLM-generated Cypher: {cypher_query}")
+            # Validate with EXPLAIN before executing
+            valid, err = self._validate_cypher(cypher_query)
+            if not valid:
+                logger.warning(f"Cypher validation failed ({err}); attempting self-correction")
+                retry_prompt = (
+                    f"{prompt}\n\n"
+                    f"The query you previously generated failed validation with error:\n{err}\n"
+                    "Return ONLY a corrected Cypher query, no prose."
+                )
+                cypher_query = self._call_cypher_llm(retry_prompt)
+                valid2, err2 = self._validate_cypher(cypher_query)
+                if not valid2:
+                    raise CypherGenerationError(
+                        f"Cypher generation failed after retry. Last error: {err2}"
+                    )
+
+            logger.info(f"LLM-generated Cypher (validated): {cypher_query}")
             return cypher_query, ""
 
+        except CypherGenerationError:
+            raise
         except Exception as e:
             logger.error(f"Error generating Cypher query: {e}")
             return "", f"Error generating query: {str(e)}"
