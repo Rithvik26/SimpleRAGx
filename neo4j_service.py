@@ -128,35 +128,43 @@ class Neo4jService:
         return stats
     
     def _store_entity(self, session, entity: Dict[str, Any], document_name: str = None):
-        """Store a single entity in Neo4j."""
+        """Store a single entity in Neo4j, MERGing on stable canonical id."""
+        from entity_canonicalizer import canonical_id as _canonical_id
+        entity_id = entity.get("id") or _canonical_id(
+            entity.get("name", ""), entity.get("type", "UNKNOWN")
+        )
         query = """
-        MERGE (e:Entity {name: $name})
-        SET e.type = $type,
+        MERGE (e:Entity {id: $id})
+        SET e.name = $name,
+            e.type = $type,
+            e.aliases = $aliases,
             e.description = $description,
             e.source_chunks = $source_chunks,
             e.source_texts = $source_texts,
             e.merged_from = $merged_from,
             e.updated_at = $timestamp
         """
-        
+
         params = {
+            "id": entity_id,
             "name": entity.get("name", ""),
             "type": entity.get("type", "UNKNOWN"),
+            "aliases": json.dumps(entity.get("aliases", [entity.get("name", "")])),
             "description": entity.get("description", ""),
             "source_chunks": json.dumps(entity.get("source_chunks", [])),
             "source_texts": json.dumps(entity.get("source_texts", [])),
             "merged_from": entity.get("merged_from", 1),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
         }
-        
+
         session.run(query, **params)
-        
+
         # Link to document if provided
         if document_name:
             session.run("""
-                MATCH (e:Entity {name: $entity_name}), (d:Document {name: $doc_name})
+                MATCH (e:Entity {id: $entity_id}), (d:Document {name: $doc_name})
                 MERGE (e)-[:EXTRACTED_FROM]->(d)
-                """, entity_name=entity.get("name"), doc_name=document_name)
+                """, entity_id=entity_id, doc_name=document_name)
     
     def _store_relationship(self, session, relationship: Dict[str, Any], document_name: str = None):
         """Store a single relationship in Neo4j."""

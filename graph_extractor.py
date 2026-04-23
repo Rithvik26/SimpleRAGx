@@ -17,6 +17,7 @@ import os
 from typing import Dict, Any, List, Optional
 
 import litellm
+from entity_canonicalizer import canonical_id
 
 logger = logging.getLogger(__name__)
 
@@ -214,10 +215,12 @@ class GraphExtractor:
                     "_score":        score,  # internal, stripped later
                 }
 
-        # Drop internal key and cap
+        # Drop internal key, attach stable ID, and cap
         entities = []
         for e in list(seen.values())[: self.max_entities_per_chunk]:
             e.pop("_score", None)
+            e["id"] = canonical_id(e["name"], e["type"])
+            e.setdefault("aliases", [e["name"]])
             entities.append(e)
 
         # ── Stage 2: LLM relationship extraction ───────────────────────────

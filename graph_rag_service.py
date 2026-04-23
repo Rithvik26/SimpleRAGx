@@ -153,13 +153,12 @@ class GraphRAGService:
         
         for entity_type, type_entities in entities_by_type.items():
             logger.debug(f"Merging {len(type_entities)} entities of type {entity_type}")
-            
-            # For each type, group by normalized name
+
+            # Group by canonical ID — stable across re-ingests
             groups = defaultdict(list)
-            
             for entity in type_entities:
-                normalized_name = self._normalize_entity_name(entity["name"])
-                groups[normalized_name].append(entity)
+                key = entity.get("id") or self._normalize_entity_name(entity["name"])
+                groups[key].append(entity)
             
             # Merge entities within each group
             for normalized_name, group in groups.items():
@@ -211,11 +210,17 @@ class GraphRAGService:
         
         # Use the first entity as the base
         merged_entity = entities[0].copy()
-        
-        # Collect all names and pick the most common or longest
+
+        # Collect all surface names; longest wins as canonical display name
         all_names = [e["name"] for e in entities]
-        # Pick the longest name as it's likely more descriptive
         merged_entity["name"] = max(all_names, key=len)
+
+        # Preserve canonical ID from the first entity (stable across merges)
+        # and collect all surface forms as aliases
+        all_aliases: list = []
+        for e in entities:
+            all_aliases.extend(e.get("aliases", [e["name"]]))
+        merged_entity["aliases"] = list(dict.fromkeys(all_aliases))  # dedup, order-stable
         
         # Merge descriptions
         descriptions = [e.get("description", "") for e in entities if e.get("description")]
