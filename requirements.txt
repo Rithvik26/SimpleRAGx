@@ -20,3 +20,7 @@ neo4j>=5.0.0
 litellm>=1.40.0
 pymupdf>=1.24.0
 python-dotenv>=1.0.0
+# Eval harness
+ragas>=0.1.0
+datasets>=2.14.0
+pyyaml>=6.0
