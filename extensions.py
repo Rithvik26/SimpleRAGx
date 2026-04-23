@@ -11,6 +11,8 @@ import os
 from pathlib import Path
 from typing import Dict, Any, Callable, List, Optional
 
+PROGRESS_TTL_SECONDS = 3600  # evict trackers older than 1 hour
+
 # For rate limiting
 class RateLimiter:
     """Implements rate limiting for API calls."""
@@ -125,7 +127,10 @@ def cached_embedding(cache: EmbeddingCache):
 # Progress tracking
 class ProgressTracker:
     """Track progress of long-running operations."""
-    
+
+    _last_eviction: float = 0.0
+    _eviction_interval: float = 60.0  # only scan for stale entries at most once per minute
+
     def __init__(self, session_id: str, operation: str):
         """Initialize progress tracker for a specific operation and session."""
         self.session_id = session_id
@@ -135,11 +140,12 @@ class ProgressTracker:
         self.status = "initializing"
         self.message = ""
         self.current_file = ""
-        
+        self.created_at: float = time.time()
+
         # In-memory store for all progress trackers
         if not hasattr(ProgressTracker, "trackers"):
             ProgressTracker.trackers = {}
-        
+
         ProgressTracker.trackers[f"{session_id}_{operation}"] = self
     
     def update(self, progress: int, total: int, status: str = None, message: str = None, current_file: str = None):
@@ -172,9 +178,23 @@ class ProgressTracker:
         }
     
     @staticmethod
+    def _evict_stale() -> None:
+        """Remove trackers older than PROGRESS_TTL_SECONDS (batched, max once/minute)."""
+        now = time.time()
+        if now - ProgressTracker._last_eviction < ProgressTracker._eviction_interval:
+            return
+        ProgressTracker._last_eviction = now
+        if not hasattr(ProgressTracker, "trackers"):
+            return
+        cutoff = now - PROGRESS_TTL_SECONDS
+        stale = [k for k, v in ProgressTracker.trackers.items() if v.created_at < cutoff]
+        for k in stale:
+            del ProgressTracker.trackers[k]
+
+    @staticmethod
     def get_tracker(session_id: str, operation: str) -> Optional["ProgressTracker"]:
         """Get an existing progress tracker by session_id and operation."""
         if not hasattr(ProgressTracker, "trackers"):
             return None
-        
+        ProgressTracker._evict_stale()
         return ProgressTracker.trackers.get(f"{session_id}_{operation}")
