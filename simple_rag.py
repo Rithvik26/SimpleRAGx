@@ -802,7 +802,7 @@ class EnhancedSimpleRAG:
                                       message="Generating answer")
             
             if self.llm_service and self.llm_service.is_available():
-                answer = self.llm_service.generate_answer(question, contexts, progress_tracker=progress_tracker)
+                answer = self.llm_service.generate_answer(question, contexts, rag_mode="normal", progress_tracker=progress_tracker)
             else:
                 # Fallback to raw results
                 answer = self._format_raw_results(contexts)
@@ -849,6 +849,8 @@ class EnhancedSimpleRAG:
             all_contexts = doc_contexts + graph_contexts
             
             logger.info(f"Found {len(doc_contexts)} document contexts and {len(graph_contexts)} graph contexts")
+            logger.info(f"GRAPH DEBUG doc_contexts[0] metadata: {doc_contexts[0]['metadata'] if doc_contexts else 'EMPTY'}")
+            logger.info(f"GRAPH DEBUG graph_contexts types: {[c['metadata'].get('type') for c in graph_contexts[:3]]}")
             
             if not all_contexts:
                 if progress_tracker:
@@ -873,9 +875,10 @@ class EnhancedSimpleRAG:
             
             if self.llm_service and self.llm_service.is_available():
                 answer = self.llm_service.generate_answer(
-                    question, 
-                    all_contexts, 
+                    question,
+                    all_contexts,
                     graph_context=graph_context,
+                    rag_mode="graph",
                     progress_tracker=progress_tracker
                 )
             else:

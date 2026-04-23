@@ -5,6 +5,7 @@ Gemini-only — Claude/Anthropic dependency removed.
 
 import logging
 import os
+import threading
 import litellm
 from typing import List, Dict, Any, Optional
 from extensions import ProgressTracker
@@ -158,7 +159,7 @@ class LLMService:
         self.gemini_api_key = config.get("gemini_api_key", "")
         self.rag_mode = config.get("rag_mode", "normal")
         self.complexity_analyzer = QueryComplexityAnalyzer()
-        self._last_complexity_analysis = None
+        self._thread_local = threading.local()
 
         if self.gemini_api_key:
             os.environ.setdefault("GEMINI_API_KEY", self.gemini_api_key)
@@ -170,13 +171,15 @@ class LLMService:
 
     def generate_answer(self, query: str, contexts: List[Dict[str, Any]],
                         graph_context: Dict[str, Any] = None,
+                        rag_mode: str = None,
                         progress_tracker: Optional[ProgressTracker] = None) -> str:
+        effective_mode = rag_mode if rag_mode is not None else self.rag_mode
         query_lower = query.lower()
         num_contexts = len(contexts)
 
         if (num_contexts <= 2 and
                 any(indicator in query_lower for indicator in ['what is', 'who is', 'when', 'where', 'define'])):
-            self._last_complexity_analysis = {
+            self._thread_local.last_complexity_analysis = {
                 'complexity_level': 'simple',
                 'recommended_max_tokens': 1500,
                 'response_type': 'Concise answer',
@@ -188,18 +191,19 @@ class LLMService:
             if progress_tracker:
                 progress_tracker.update(65, 100, status="analyzing",
                                         message="Analyzing query complexity")
-            self._last_complexity_analysis = self.complexity_analyzer.analyze(
-                query, contexts, self.rag_mode
+            self._thread_local.last_complexity_analysis = self.complexity_analyzer.analyze(
+                query, contexts, effective_mode
             )
-            logger.info(f"Query complexity: {self._last_complexity_analysis['complexity_level']} — "
-                        f"{self._last_complexity_analysis['reasoning']}")
+            ca = self._thread_local.last_complexity_analysis
+            logger.info(f"Query complexity: {ca['complexity_level']} — {ca['reasoning']}")
 
         if progress_tracker:
+            ca = self._thread_local.last_complexity_analysis
             progress_tracker.update(70, 100, status="generating",
-                                    message=f"Generating {self._last_complexity_analysis['response_type']}")
+                                    message=f"Generating {ca['response_type']}")
 
         try:
-            if self.rag_mode == "graph" and graph_context:
+            if effective_mode == "graph" and graph_context:
                 return self._generate_graph_rag_answer(query, contexts, graph_context, progress_tracker)
             else:
                 return self._generate_normal_rag_answer(query, contexts, progress_tracker)
@@ -219,7 +223,7 @@ class LLMService:
             context_sections.append(f"[Source: {filename}]\n{text}")
         context_text = "\n\n---\n\n".join(context_sections)
 
-        complexity = self._last_complexity_analysis or {}
+        complexity = getattr(self._thread_local, 'last_complexity_analysis', None) or {}
         complexity_level = complexity.get('complexity_level', 'simple')
         response_type = complexity.get('response_type', 'Brief answer')
 
@@ -248,7 +252,7 @@ ANSWER:"""
     def _generate_graph_rag_answer(self, query: str, contexts: List[Dict[str, Any]],
                                    graph_context: Dict[str, Any],
                                    progress_tracker: Optional[ProgressTracker] = None) -> str:
-        document_contexts = [ctx for ctx in contexts if ctx['metadata'].get('type') == 'document']
+        document_contexts = [ctx for ctx in contexts if ctx['metadata'].get('type') not in ('entity', 'relationship')]
         entity_contexts = graph_context.get('entities', [])
         relationship_contexts = graph_context.get('relationships', [])
 
@@ -290,7 +294,7 @@ ANSWER:"""
                 rel_list.append(entry)
             relationships_text = "\n".join(rel_list)
 
-        complexity = self._last_complexity_analysis or {}
+        complexity = getattr(self._thread_local, 'last_complexity_analysis', None) or {}
         complexity_level = complexity.get('complexity_level', 'simple')
 
         prompt = f"""You are an AI assistant with access to both documents and a knowledge graph. Answer using relationship reasoning when relevant.
@@ -323,7 +327,7 @@ ANSWER:"""
         if not self.gemini_api_key:
             return "Gemini API key not configured. Please add gemini_api_key to your configuration."
 
-        complexity = self._last_complexity_analysis or {}
+        complexity = getattr(self._thread_local, 'last_complexity_analysis', None) or {}
         max_tokens = min(complexity.get('recommended_max_tokens', 2000), 8192)
 
         try:
@@ -369,7 +373,7 @@ ANSWER:"""
         return answer
 
     def _generate_raw_response(self, prompt: str) -> str:
-        complexity = self._last_complexity_analysis or {}
+        complexity = getattr(self._thread_local, 'last_complexity_analysis', None) or {}
         lines = [
             "=== RAW MODE RESPONSE ===",
             f"RAG Mode: {self.rag_mode}",
@@ -383,7 +387,7 @@ ANSWER:"""
         return "\n".join(lines)
 
     def get_last_complexity_analysis(self) -> Dict[str, Any]:
-        return self._last_complexity_analysis or {
+        return getattr(self._thread_local, 'last_complexity_analysis', None) or {
             'complexity_level': 'unknown',
             'recommended_max_tokens': 2000,
             'response_type': 'Unknown',
@@ -489,7 +493,7 @@ ANSWER:"""
         if neo4j_contexts:
             neo4j_text = "\n\n".join(f"[Neo4j Query Result]\n{ctx['text']}" for ctx in neo4j_contexts)
 
-        complexity = self._last_complexity_analysis or {}
+        complexity = getattr(self._thread_local, 'last_complexity_analysis', None) or {}
         complexity_level = complexity.get('complexity_level', 'simple')
         response_type = complexity.get('response_type', 'Brief answer')
 
