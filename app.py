@@ -183,57 +183,73 @@ def process_parallel_queries(question: str, session_id: str) -> Dict[str, Any]:
         progress_tracker.update(20, 100, status="processing",
                                message="Starting parallel execution in all modes")
     
-    # Create a lock for thread-safe mode switching
-    mode_lock = threading.Lock()
-    completed_modes = {'count': 0}
-    
+    completed_count = [0]
+    completed_lock = threading.Lock()
+
+    # Create one progress tracker per mode so the UI can poll each independently
+    mode_trackers = {}
+    for m in ['normal', 'graph', 'hybrid_neo4j', 'pageindex']:
+        t = ProgressTracker(f"{session_id}_{m}", "query")
+        t.update(0, 100, status="starting", message=f"Waiting to start...")
+        mode_trackers[m] = t
+
     def run_query_mode(mode: str) -> tuple:
         """Run query in a specific mode and measure time."""
         start_time = time.time()
+        mode_tracker = mode_trackers[mode]
+        mode_tracker.update(5, 100, status="running", message="Initializing...")
         try:
-            # Availability checks (read-only, no lock needed)
+            # Availability checks
             if mode == 'hybrid_neo4j':
                 if not simplerag_instance.is_graph_ready():
+                    mode_tracker.update(100, 100, status="error", message="Graph RAG not available")
                     return (mode, None, time.time() - start_time, "Graph RAG not available for hybrid mode")
                 if not simplerag_instance.is_neo4j_ready():
+                    mode_tracker.update(100, 100, status="error", message="Neo4j not available")
                     return (mode, None, time.time() - start_time, "Neo4j not available for hybrid mode")
             elif mode == 'graph':
                 if not simplerag_instance.is_graph_ready():
+                    mode_tracker.update(100, 100, status="error", message="Graph RAG not initialized")
                     return (mode, None, time.time() - start_time, "Graph RAG not initialized")
             elif mode == 'pageindex':
                 if not simplerag_instance.is_pageindex_ready():
+                    mode_tracker.update(100, 100, status="error", message="PageIndex not available")
                     return (mode, None, time.time() - start_time, "PageIndex not available")
 
-            # Each mode queries its own service directly — no shared mode state
+            # Call each mode's method directly with its own tracker — truly parallel
             if mode == 'pageindex':
                 result = simplerag_instance.query_pageindex(question, session_id=f"{session_id}_{mode}")
                 answer = result.get("answer") if result.get("success") else None
                 if not answer:
+                    mode_tracker.update(100, 100, status="error", message="PageIndex query failed")
                     return (mode, None, time.time() - start_time, result.get("error", "PageIndex query failed"))
+            elif mode == 'graph':
+                answer = simplerag_instance._query_graph_mode(question, mode_tracker)
+            elif mode == 'hybrid_neo4j':
+                answer = simplerag_instance._query_hybrid_neo4j_mode(question, mode_tracker)
             else:
-                # Set + query atomically under lock so threads don't stomp each other's mode
-                with mode_lock:
-                    simplerag_instance.set_rag_mode(mode)
-                    answer = simplerag_instance.query(question, f"{session_id}_{mode}")
+                answer = simplerag_instance._query_normal_mode(question, mode_tracker)
 
-            with mode_lock:
-                completed_modes['count'] += 1
+            mode_tracker.update(100, 100, status="complete", message="Done")
+
+            with completed_lock:
+                completed_count[0] += 1
+                count = completed_count[0]
                 if progress_tracker:
-                    progress = 20 + (completed_modes['count'] * 20)
-                    progress_tracker.update(progress, 100, status="processing",
-                                            message=f"Completed {mode} mode ({completed_modes['count']}/4)")
+                    progress_tracker.update(20 + count * 20, 100, status="processing",
+                                            message=f"Completed {mode} mode ({count}/4)")
 
             elapsed_time = time.time() - start_time
             return (mode, answer, elapsed_time, None)
 
         except Exception as e:
-            with mode_lock:
-                completed_modes['count'] += 1
+            mode_tracker.update(100, 100, status="error", message=str(e)[:80])
+            with completed_lock:
+                completed_count[0] += 1
+                count = completed_count[0]
                 if progress_tracker:
-                    progress = 20 + (completed_modes['count'] * 20)
-                    progress_tracker.update(progress, 100, status="processing",
-                                            message=f"Error in {mode} mode ({completed_modes['count']}/4)")
-                    
+                    progress_tracker.update(20 + count * 20, 100, status="processing",
+                                            message=f"Error in {mode} mode ({count}/4)")
             elapsed_time = time.time() - start_time
             logger.error(f"Error in {mode} mode: {e}")
             return (mode, None, elapsed_time, str(e))
@@ -784,6 +800,20 @@ def get_progress(operation_type):
             "current_file": "Processing..."
         })
     
+    return jsonify(tracker.get_info())
+
+
+@app.route('/api/progress/parallel/<mode>')
+def get_parallel_mode_progress(mode):
+    """Per-mode progress for parallel queries — each bar polls this independently."""
+    if mode not in ('normal', 'graph', 'hybrid_neo4j', 'pageindex'):
+        return jsonify({"percentage": 0, "status": "starting", "message": "Unknown mode"}), 200
+    session_id = session.get('session_id')
+    if not session_id:
+        return jsonify({"percentage": 0, "status": "starting", "message": "Initializing..."}), 200
+    tracker = ProgressTracker.get_tracker(f"{session_id}_{mode}", "query")
+    if not tracker:
+        return jsonify({"percentage": 0, "status": "starting", "message": "Starting..."}), 200
     return jsonify(tracker.get_info())
 
 
