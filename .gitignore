@@ -15,3 +15,7 @@ dev_config.json
 
 # Temporary files
 tmp/
+
+# Benchmark / smoke-test scripts (may contain local credentials)
+benchmark_modes.py
+smoke_test_pageindex.py
