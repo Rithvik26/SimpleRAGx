@@ -113,25 +113,38 @@ def _compute_ragas(samples: List[Dict], gemini_api_key: str) -> Dict[str, float]
         from ragas import evaluate
         from ragas.dataset_schema import SingleTurnSample, EvaluationDataset
         from ragas.metrics import Faithfulness, AnswerRelevancy, ContextPrecision, ContextRecall
-        from ragas.llms import LangchainLLMWrapper
-        from ragas.embeddings import LangchainEmbeddingsWrapper
         from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
     except ImportError as e:
         print(f"Import error: {e}. Run: pip install ragas datasets langchain-google-genai")
         return {}
 
-    # Configure RAGAS to use Gemini instead of OpenAI
-    lc_llm   = ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash",
-        google_api_key=gemini_api_key,
-        temperature=0,
-    )
-    lc_emb   = GoogleGenerativeAIEmbeddings(
-        model="models/embedding-001",
-        google_api_key=gemini_api_key,
-    )
-    ragas_llm = LangchainLLMWrapper(lc_llm)
-    ragas_emb = LangchainEmbeddingsWrapper(lc_emb)
+    # Configure RAGAS to use Gemini via the modern llm_factory / embeddings API
+    try:
+        from ragas.llms import llm_factory
+        from ragas.embeddings import embedding_factory
+        ragas_llm = llm_factory(
+            model="gemini/gemini-2.0-flash",
+            provider="litellm",
+        )
+        ragas_emb = embedding_factory(
+            model="gemini/text-embedding-004",
+            provider="litellm",
+        )
+    except Exception:
+        # Fallback: LangchainLLMWrapper still works in 0.4.x (just deprecated)
+        from ragas.llms import LangchainLLMWrapper
+        from ragas.embeddings import LangchainEmbeddingsWrapper
+        lc_llm = ChatGoogleGenerativeAI(
+            model="gemini-2.0-flash",
+            google_api_key=gemini_api_key,
+            temperature=0,
+        )
+        lc_emb = GoogleGenerativeAIEmbeddings(
+            model="models/embedding-001",
+            google_api_key=gemini_api_key,
+        )
+        ragas_llm = LangchainLLMWrapper(lc_llm)
+        ragas_emb = LangchainEmbeddingsWrapper(lc_emb)
 
     ragas_samples = [
         SingleTurnSample(
