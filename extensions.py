@@ -11,7 +11,8 @@ import os
 from pathlib import Path
 from typing import Dict, Any, Callable, List, Optional
 
-PROGRESS_TTL_SECONDS = 3600  # evict trackers older than 1 hour
+PROGRESS_TTL_SECONDS = 3600   # evict trackers older than 1 hour
+EMBEDDING_CACHE_MAX  = 10_000  # max cached embeddings; evict oldest 20% when full
 
 # For rate limiting
 class RateLimiter:
@@ -53,43 +54,48 @@ class RateLimiter:
 
 # For caching embeddings
 class EmbeddingCache:
-    """Cache for embeddings to reduce API calls."""
-    
+    """Disk-backed cache for embeddings with a max-entry size bound."""
+
     def __init__(self, cache_dir: str = None):
-        """Initialize embedding cache with specified directory."""
         if cache_dir is None:
             cache_dir = os.path.join(os.path.expanduser("~"), ".simplerag", "cache")
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-    
+        self._lock = threading.Lock()
+
     def _get_cache_key(self, text: str) -> str:
-        """Generate a cache key for the given text."""
         return hashlib.md5(text.encode("utf-8")).hexdigest()
-    
+
+    def _evict_if_needed(self) -> None:
+        """Delete oldest 20% of files when cache exceeds EMBEDDING_CACHE_MAX."""
+        files = sorted(self.cache_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
+        if len(files) <= EMBEDDING_CACHE_MAX:
+            return
+        evict_n = max(1, EMBEDDING_CACHE_MAX // 5)
+        for f in files[:evict_n]:
+            try:
+                f.unlink()
+            except OSError:
+                pass
+
     def get(self, text: str) -> Optional[List[float]]:
-        """Get embedding from cache if it exists."""
-        cache_key = self._get_cache_key(text)
-        cache_file = self.cache_dir / f"{cache_key}.json"
-        
+        cache_file = self.cache_dir / f"{self._get_cache_key(text)}.json"
         if cache_file.exists():
             try:
                 with open(cache_file, "r") as f:
                     return json.load(f)
             except (json.JSONDecodeError, IOError):
-                # If file is corrupted, return None
                 return None
         return None
-    
+
     def set(self, text: str, embedding: List[float]) -> None:
-        """Store embedding in cache."""
-        cache_key = self._get_cache_key(text)
-        cache_file = self.cache_dir / f"{cache_key}.json"
-        
+        cache_file = self.cache_dir / f"{self._get_cache_key(text)}.json"
         try:
-            with open(cache_file, "w") as f:
-                json.dump(embedding, f)
+            with self._lock:
+                self._evict_if_needed()
+                with open(cache_file, "w") as f:
+                    json.dump(embedding, f)
         except IOError:
-            # If we can't write to cache, just continue
             pass
 
 # Decorators for using rate limiting and caching
@@ -141,6 +147,7 @@ class ProgressTracker:
         self.message = ""
         self.current_file = ""
         self.created_at: float = time.time()
+        self._lock = threading.Lock()
 
         # In-memory store for all progress trackers
         if not hasattr(ProgressTracker, "trackers"):
@@ -149,33 +156,31 @@ class ProgressTracker:
         ProgressTracker.trackers[f"{session_id}_{operation}"] = self
     
     def update(self, progress: int, total: int, status: str = None, message: str = None, current_file: str = None):
-        """Update progress information."""
-        self.progress = progress
-        self.total = total
-        
-        if status:
-            self.status = status
-        
-        if message:
-            self.message = message
-            
-        if current_file:
-            self.current_file = current_file
+        """Update progress information (thread-safe)."""
+        with self._lock:
+            self.progress = progress
+            self.total = total
+            if status:
+                self.status = status
+            if message:
+                self.message = message
+            if current_file:
+                self.current_file = current_file
     
     def get_info(self) -> Dict[str, Any]:
-        """Get current progress information."""
-        percentage = int((self.progress / self.total * 100) if self.total > 0 else 0)
-        
-        return {
-            "session_id": self.session_id,
-            "operation": self.operation,
-            "progress": self.progress,
-            "total": self.total,
-            "percentage": percentage,
-            "status": self.status,
-            "message": self.message,
-            "current_file": self.current_file
-        }
+        """Get a consistent snapshot of current progress (thread-safe)."""
+        with self._lock:
+            percentage = int((self.progress / self.total * 100) if self.total > 0 else 0)
+            return {
+                "session_id":   self.session_id,
+                "operation":    self.operation,
+                "progress":     self.progress,
+                "total":        self.total,
+                "percentage":   percentage,
+                "status":       self.status,
+                "message":      self.message,
+                "current_file": self.current_file,
+            }
     
     @staticmethod
     def _evict_stale() -> None:

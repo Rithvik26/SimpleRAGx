@@ -1,0 +1,92 @@
+name: RAGAS Eval
+
+on:
+  push:
+    branches: ["master", "main"]
+  pull_request:
+    branches: ["master", "main"]
+
+jobs:
+  ragas-eval:
+    name: RAGAS metric regression check
+    runs-on: ubuntu-latest
+    # Only run when eval or RAG source files change to avoid burning credits on docs/config PRs
+    if: |
+      contains(github.event.head_commit.modified, 'eval/') ||
+      contains(github.event.head_commit.modified, 'simple_rag.py') ||
+      contains(github.event.head_commit.modified, 'graph_rag_service.py') ||
+      contains(github.event.head_commit.modified, 'neo4j_service.py') ||
+      contains(github.event.head_commit.modified, 'embedding_service.py') ||
+      contains(github.event.head_commit.modified, 'document_processor.py') ||
+      github.event_name == 'workflow_dispatch'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run RAGAS harness (normal mode)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          QDRANT_URL: ${{ secrets.QDRANT_URL }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+        run: |
+          python eval/ragas_harness.py \
+            --modes normal \
+            --out eval/results_ci.json
+
+      - name: Check metric regression vs baseline
+        run: |
+          python - <<'EOF'
+          import json, sys
+
+          baseline_path = "eval/baseline_phase1.json"
+          ci_path       = "eval/results_ci.json"
+          THRESHOLD     = 0.05   # fail if any metric drops more than 5pp
+
+          try:
+              baseline = json.load(open(baseline_path))
+          except FileNotFoundError:
+              print("No baseline found — skipping regression check (first run).")
+              sys.exit(0)
+
+          ci = json.load(open(ci_path))
+          failures = []
+
+          for mode, data in ci.items():
+              if mode not in baseline:
+                  continue
+              base_metrics = baseline[mode].get("metrics", {})
+              ci_metrics   = data.get("metrics", {})
+              for metric, ci_val in ci_metrics.items():
+                  base_val = base_metrics.get(metric)
+                  if base_val is None:
+                      continue
+                  drop = base_val - ci_val
+                  if drop > THRESHOLD:
+                      failures.append(
+                          f"  {mode}/{metric}: {base_val:.4f} → {ci_val:.4f} (drop {drop:.4f} > {THRESHOLD})"
+                      )
+
+          if failures:
+              print("RAGAS regression detected:")
+              for f in failures:
+                  print(f)
+              sys.exit(1)
+          else:
+              print("All metrics within threshold. OK.")
+          EOF
+
+      - name: Upload eval results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ragas-results-${{ github.sha }}
+          path: eval/results_ci.json
