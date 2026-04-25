@@ -76,16 +76,29 @@ def _build_cfg(collection_suffix: str = "") -> Dict:
     }
 
 
+_rag_cache: Dict[str, Any] = {}  # mode -> SimpleRAG instance (reuse across questions)
+
+
 def _query_mode(mode: str, question: str, cfg: Dict) -> Dict[str, Any]:
     """Run a single question through the given mode. Returns {answer, contexts}."""
+    from config import ConfigManager
     from simple_rag import SimpleRAG
 
-    rag = SimpleRAG(cfg)
-    rag.set_rag_mode(mode)
+    if mode not in _rag_cache:
+        # Build a ConfigManager from the plain cfg dict
+        cm = ConfigManager.__new__(ConfigManager)
+        cm.config_path = "/tmp/ragas_eval_config.json"
+        cm.force_fresh_start = False
+        cm.config = dict(cfg)
+        cm.config["rag_mode"] = mode
 
-    if not rag.is_ready():
-        print(f"    Indexing {TEST_PDF} for mode={mode}…")
-        rag.process_document(TEST_PDF)
+        rag = SimpleRAG(cm)
+        if not rag.is_ready():
+            print(f"    Indexing {TEST_PDF} for mode={mode}…")
+            rag.process_document(TEST_PDF)
+        _rag_cache[mode] = rag
+    else:
+        rag = _rag_cache[mode]
 
     result = rag.query(question)
     answer   = result.get("answer", "")
@@ -139,7 +152,17 @@ def _compute_ragas(samples: List[Dict], gemini_api_key: str) -> Dict[str, float]
     ]
 
     result = evaluate(dataset, metrics=metrics)
-    return {k: round(float(v), 4) for k, v in result.items()}
+
+    # RAGAS 0.4.x: result.scores is a list of per-sample dicts; compute means
+    scores = result.scores  # list[dict]
+    if not scores:
+        return {}
+    metric_keys = [k for k in scores[0].keys() if k != "user_input"]
+    averages: Dict[str, float] = {}
+    for k in metric_keys:
+        vals = [s[k] for s in scores if s.get(k) is not None]
+        averages[k] = round(sum(vals) / len(vals), 4) if vals else 0.0
+    return averages
 
 
 def main():
