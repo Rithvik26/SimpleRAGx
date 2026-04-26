@@ -402,32 +402,87 @@ class VectorDBService:
                                        message=f"Error: {str(e)}")
             raise RuntimeError(error_msg)
     
-    def search_similar(self, query_embedding: List[float], top_k: int = 5, 
-                      filter_condition=None, collection_name: str = None) -> List[Dict[str, Any]]:
-        """Search for similar documents using vector similarity with error handling."""
+    @staticmethod
+    def build_filter(filters: Dict[str, Any]):
+        """
+        Build a Qdrant Filter from a plain dict of {field: value} conditions.
+
+        Values stored under chunk metadata are nested as payload.metadata.<field>,
+        so filters look up that path. Supports str, int, and list field types.
+
+        Example:
+            build_filter({"sector": "fintech", "stage": "series_a"})
+        """
+        if not filters:
+            return None
+        try:
+            conditions = []
+            for field, value in filters.items():
+                nested_key = f"metadata.{field}"
+                if isinstance(value, list):
+                    # match any element in the list
+                    conditions.append(
+                        models.FieldCondition(
+                            key=nested_key,
+                            match=models.MatchAny(any=value),
+                        )
+                    )
+                else:
+                    conditions.append(
+                        models.FieldCondition(
+                            key=nested_key,
+                            match=models.MatchValue(value=value),
+                        )
+                    )
+            return models.Filter(must=conditions)
+        except Exception as e:
+            logger.warning(f"Could not build Qdrant filter from {filters}: {e}")
+            return None
+
+    def search_similar(self, query_embedding: List[float], top_k: int = 5,
+                      filter_condition=None, collection_name: str = None,
+                      filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+        """
+        Search for similar documents using vector similarity.
+
+        Args:
+            query_embedding: dense embedding vector
+            top_k: number of results to return
+            filter_condition: raw Qdrant Filter object (advanced use)
+            collection_name: override the default collection
+            filters: simple dict of {field: value} for domain metadata pre-filtering;
+                     converted to a Qdrant Filter automatically via build_filter()
+        """
         if not self.is_available():
             logger.error(f"Vector database not available for search. Last error: {self.last_error}")
             return []
-        
+
         if collection_name is None:
             collection_name = self.collection_name
-        
+
         if not query_embedding or len(query_embedding) != self.embedding_dimension:
             logger.error(f"Invalid query embedding: expected {self.embedding_dimension} dimensions, got {len(query_embedding) if query_embedding else 0}")
             return []
-        
+
+        # Resolve filter: explicit filter_condition wins; otherwise build from filters dict
+        resolved_filter = filter_condition
+        if resolved_filter is None and filters:
+            resolved_filter = self.build_filter(filters)
+            if resolved_filter:
+                logger.debug(f"Applying metadata pre-filter: {filters}")
+
         try:
             # Ensure collection exists
             self.ensure_collection_exists(collection_name)
-            
+
             logger.debug(f"Searching in collection: {collection_name} with top_k={top_k}")
-            
+
             # Use query_points for qdrant-client >= 1.7 (current standard API)
             search_result = self.client.query_points(
                 collection_name=collection_name,
                 query=query_embedding,
                 limit=top_k,
-                query_filter=filter_condition,
+                query_filter=resolved_filter,
                 with_payload=True
             ).points
             

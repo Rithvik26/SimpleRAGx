@@ -53,6 +53,16 @@ DEFAULT_CONFIG = {
     "pageindex_workspace":      "",    # defaults to ~/.simplerag/pageindex_workspace
     "pageindex_max_tool_rounds": 4,    # agentic loop rounds before forcing final answer
     "pageindex_enabled":        True,
+
+    # Domain configuration — set to any key in domain_config.DOMAINS
+    # Built-in: "vc_financial" (default), "legal", "healthcare", "general"
+    "active_domain": "vc_financial",
+    # Set False to skip LLM metadata extraction at ingest (faster, no domain filtering)
+    "enable_metadata_extraction": True,
+    # Reranker: re-orders retrieval results using Gemini (biggest single quality win)
+    "enable_reranking": True,
+    # Query planner: HyDE + decomposition for multi-hop queries
+    "enable_query_planning": True,
 }
 
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "/tmp/simplerag_config.json")  # Use temp file instead

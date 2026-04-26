@@ -13,7 +13,7 @@
 {% else %}
 <div class="alert alert-warning">
     <strong>⚠️ Agentic RAG AI Not Available</strong><br>
-    Please ensure Claude API key is configured in <a href="{{ url_for('setup') }}">Settings</a>.
+    Please ensure Gemini API key is configured in <a href="{{ url_for('setup') }}">Settings</a>.
 </div>
 {% endif %}
 
@@ -100,7 +100,11 @@
         </div>
         <div class="card-body">
             <ul class="mb-0">
-                <li><strong>Complex Questions:</strong> "How are TechCorp's partnerships related to their leadership structure?"</li>
+                <li><strong>Cross-document relationships:</strong> "How are TechCorp's partnerships related to their leadership structure?"</li>
+                <li><strong>Multi-hop reasoning:</strong> "Who are the founders of the companies that compete with Acme in the insurtech space?"</li>
+                <li><strong>Fact verification:</strong> "Is it true that TechCorp exceeded $10M ARR in Q1 2025? Find supporting evidence."</li>
+                <li><strong>Current events:</strong> "Search the web for recent news about the companies mentioned in our documents."</li>
+                <li><strong>Deep document research:</strong> "Summarise every financial metric mentioned across all uploaded reports."</li>
             </ul>
         </div>
     </div>
@@ -114,21 +118,39 @@
             <h6>📊 Agentic RAG AI Status</h6>
         </div>
         <div class="card-body">
-            <div class="row text-center">
+            <div class="row text-center g-3">
                 <div class="col">
-                    <h6>Service Status</h6>
+                    <h6>Service</h6>
                     <span class="badge bg-{{ 'success' if agentic_stats.service_available else 'danger' }}">
-                        {{ 'Available' if agentic_stats.service_available else 'Not Available' }}
+                        {{ 'Ready' if agentic_stats.service_available else 'Unavailable' }}
                     </span>
                 </div>
                 <div class="col">
-                    <h6>Available Tools</h6>
+                    <h6>Tools</h6>
                     <span class="badge bg-primary">{{ agentic_stats.tools_count }}</span>
                 </div>
                 <div class="col">
-                    <h6>LLM Status</h6>
+                    <h6>Gemini LLM</h6>
                     <span class="badge bg-{{ 'success' if agentic_stats.llm_configured else 'warning' }}">
-                        {{ 'Configured' if agentic_stats.llm_configured else 'Not Configured' }}
+                        {{ 'Configured' if agentic_stats.llm_configured else 'Missing' }}
+                    </span>
+                </div>
+                <div class="col">
+                    <h6>Web Search</h6>
+                    <span class="badge bg-{{ 'success' if agentic_stats.web_search_available else 'secondary' }}">
+                        {{ 'Available' if agentic_stats.web_search_available else 'Not installed' }}
+                    </span>
+                </div>
+                <div class="col">
+                    <h6>Graph RAG</h6>
+                    <span class="badge bg-{{ 'success' if agentic_stats.graph_rag_ready else 'secondary' }}">
+                        {{ 'Ready' if agentic_stats.graph_rag_ready else 'Off' }}
+                    </span>
+                </div>
+                <div class="col">
+                    <h6>PageIndex</h6>
+                    <span class="badge bg-{{ 'success' if agentic_stats.pageindex_ready else 'secondary' }}">
+                        {{ 'Ready' if agentic_stats.pageindex_ready else 'Off' }}
                     </span>
                 </div>
             </div>
@@ -186,46 +208,71 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
     
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    function toolBadgeColor(tool) {
+        if (tool === 'web_search') return 'bg-warning text-dark';
+        if (tool === 'search_knowledge_graph') return 'bg-success';
+        if (tool === 'search_pageindex') return 'bg-purple' ;
+        return 'bg-primary';
+    }
+
     function displayResults(result) {
-        // Display answer
-        document.getElementById('agentic-answer').innerHTML = result.answer.replace(/\n/g, '<br>');
-        
+        // Display answer (XSS-safe: escape first, then convert newlines to <br>)
+        document.getElementById('agentic-answer').innerHTML =
+            escapeHtml(result.answer).replace(/\n/g, '<br>');
+
         // Display tools used
         const toolsBadges = document.getElementById('tools-used-badges');
         toolsBadges.innerHTML = '';
-        result.tools_used.forEach(tool => {
-            const badge = document.createElement('span');
-            badge.className = 'badge bg-primary me-2';
-            badge.textContent = tool.replace('_', ' ');
-            toolsBadges.appendChild(badge);
-        });
-        
+        if (result.tools_used && result.tools_used.length > 0) {
+            result.tools_used.forEach(tool => {
+                const badge = document.createElement('span');
+                badge.className = `badge me-2 ${toolBadgeColor(tool)}`;
+                badge.textContent = tool.replace(/_/g, ' ');
+                toolsBadges.appendChild(badge);
+            });
+        } else {
+            toolsBadges.innerHTML = '<span class="text-muted">No tool calls recorded</span>';
+        }
+
         // Display reasoning steps
         const reasoningDiv = document.getElementById('reasoning-steps');
         reasoningDiv.innerHTML = '';
-        
-        result.reasoning_steps.forEach((step, index) => {
-            const stepDiv = document.createElement('div');
-            stepDiv.className = 'accordion-item';
-            stepDiv.innerHTML = `
-                <h2 class="accordion-header" id="step-heading-${index}">
-                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" 
-                            data-bs-target="#step-${index}" aria-expanded="false">
-                        Step ${index + 1}: ${step.tool.replace('_', ' ')}
-                    </button>
-                </h2>
-                <div id="step-${index}" class="accordion-collapse collapse" 
-                     data-bs-parent="#reasoning-steps">
-                    <div class="accordion-body">
-                        <p><strong>Tool:</strong> ${step.tool}</p>
-                        <p><strong>Input:</strong> ${step.input}</p>
-                        ${step.reasoning ? '<p><strong>Reasoning:</strong> ' + step.reasoning + '</p>' : ''}
+
+        if (result.reasoning_steps && result.reasoning_steps.length > 0) {
+            result.reasoning_steps.forEach((step, index) => {
+                const stepDiv = document.createElement('div');
+                stepDiv.className = 'accordion-item';
+                const toolLabel = escapeHtml(step.tool.replace(/_/g, ' '));
+                const toolRaw = escapeHtml(step.tool);
+                const inputText = escapeHtml(step.input || '');
+                const observationText = escapeHtml(step.observation || '');
+                stepDiv.innerHTML = `
+                    <h2 class="accordion-header" id="step-heading-${index}">
+                        <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                                data-bs-target="#step-collapse-${index}" aria-expanded="false">
+                            Step ${index + 1}: ${toolLabel}
+                        </button>
+                    </h2>
+                    <div id="step-collapse-${index}" class="accordion-collapse collapse">
+                        <div class="accordion-body">
+                            <p><strong>Tool:</strong> <code>${toolRaw}</code></p>
+                            <p><strong>Input:</strong> ${inputText}</p>
+                            ${observationText ? `<div class="mt-2"><strong>Observation:</strong><pre class="bg-light p-2 rounded mt-1" style="white-space:pre-wrap;font-size:0.82rem;">${observationText}</pre></div>` : ''}
+                        </div>
                     </div>
-                </div>
-            `;
-            reasoningDiv.appendChild(stepDiv);
-        });
-        
+                `;
+                reasoningDiv.appendChild(stepDiv);
+            });
+        } else {
+            reasoningDiv.innerHTML = '<p class="text-muted">No intermediate reasoning steps recorded.</p>';
+        }
+
         resultsDiv.style.display = 'block';
     }
 });

@@ -7,6 +7,7 @@ import sys
 import time
 import json
 import logging
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 # Import all the modular services
@@ -17,6 +18,10 @@ from graph_rag_service import GraphRAGService
 from document_processor import DocumentProcessor
 from llm_service import LLMService
 from extensions import ProgressTracker
+from domain_config import get_domain
+from metadata_extractor import MetadataExtractor
+from reranker_service import RerankerService
+from query_planner import QueryPlanner, rrf_merge
 try:
     from agentic_service import AgenticRAGService
     _AGENTIC_AVAILABLE = True
@@ -49,7 +54,12 @@ class EnhancedSimpleRAG:
         
         # Current RAG mode
         self.rag_mode = self.config.get("rag_mode", "normal")
-        
+
+        # Domain configuration (plug-and-play)
+        active_domain_name = self.config.get("active_domain", "vc_financial")
+        self.active_domain = get_domain(active_domain_name)
+        logger.info(f"Active domain: {active_domain_name} — {self.active_domain['name']}")
+
         # Service instances
         self.document_processor = None
         self.embedding_service = None
@@ -57,6 +67,9 @@ class EnhancedSimpleRAG:
         self.llm_service = None
         self.graph_rag_service = None
         self.pageindex_service = None
+        self.metadata_extractor = None
+        self.reranker = None
+        self.query_planner = None
 
         # Track initialization status
         self.initialization_errors = []
@@ -153,6 +166,39 @@ class EnhancedSimpleRAG:
             error_msg = f"Failed to initialize Graph RAG service: {str(e)}"
             logger.error(error_msg)
             self.initialization_errors.append(error_msg)
+
+        # 6. Domain Metadata Extractor
+        try:
+            gemini_key = self.config.get("gemini_api_key", "")
+            if gemini_key and self.config.get("enable_metadata_extraction", True):
+                self.metadata_extractor = MetadataExtractor(gemini_key, self.active_domain)
+                logger.info(f". Metadata extractor initialized for domain: {self.active_domain['name']}")
+            else:
+                logger.info("Metadata extractor skipped (no Gemini key or extraction disabled)")
+        except Exception as e:
+            logger.warning(f"Metadata extractor init failed (non-fatal): {e}")
+
+        # 7. Reranker
+        try:
+            gemini_key = self.config.get("gemini_api_key", "")
+            if gemini_key and self.config.get("enable_reranking", True):
+                self.reranker = RerankerService(gemini_key)
+                logger.info(". Reranker initialized (Gemini-based)")
+            else:
+                logger.info("Reranker skipped (no Gemini key or reranking disabled)")
+        except Exception as e:
+            logger.warning(f"Reranker init failed (non-fatal): {e}")
+
+        # 8. Query Planner (decomposition + HyDE)
+        try:
+            gemini_key = self.config.get("gemini_api_key", "")
+            if gemini_key and self.config.get("enable_query_planning", True):
+                self.query_planner = QueryPlanner(gemini_key)
+                logger.info(". Query planner initialized (decomposition + HyDE)")
+            else:
+                logger.info("Query planner skipped (no Gemini key or planning disabled)")
+        except Exception as e:
+            logger.warning(f"Query planner init failed (non-fatal): {e}")
     
     def is_agentic_ready(self) -> bool:
         """Check if Agentic AI functionality is ready."""
@@ -326,12 +372,25 @@ class EnhancedSimpleRAG:
                                     message="Chunking document")
             
             chunks = self.document_processor.process_document(file_path)
-            
+
             if not chunks:
                 raise ValueError("No chunks generated from document")
-            
+
             logger.info(f"Generated {len(chunks)} chunks from document")
-            
+
+            # 2b. Domain metadata extraction — one LLM call per document, merged into all chunks
+            if self.metadata_extractor and chunks:
+                if progress_tracker:
+                    progress_tracker.update(15, 100, status="metadata",
+                                        message="Extracting domain metadata")
+                sample_text = " ".join(c['text'] for c in chunks[:8])
+                domain_meta = self.metadata_extractor.extract(sample_text, Path(file_path).name)
+                if domain_meta:
+                    domain_meta["domain"] = self.config.get("active_domain", "vc_financial")
+                    for chunk in chunks:
+                        chunk['metadata'].update(domain_meta)
+                    logger.info(f"Domain metadata merged into chunks: {list(domain_meta.keys())}")
+
             # 3. Generate embeddings in PARALLEL BATCHES (5x faster)
             if progress_tracker:
                 progress_tracker.update(30, 100, status="embedding", 
@@ -767,52 +826,102 @@ class EnhancedSimpleRAG:
                                       message=f"Error: {str(e)}")
             return f"I encountered an error while processing your query: {str(e)}"
     
-    def _query_normal_mode(self, question: str, progress_tracker: Optional[ProgressTracker] = None) -> str:
-        """Query using normal RAG mode."""
+    def query_with_filters(self, question: str, filters: Dict[str, Any],
+                           session_id: str = None) -> str:
+        """
+        Query with explicit domain metadata pre-filters.
+
+        Filters are applied before semantic search so only chunks that match
+        the filter conditions are considered. Useful for domain-specific retrieval.
+
+        Example (vc_financial domain):
+            rag.query_with_filters("What is the ARR?", {"sector": "fintech", "stage": "series_a"})
+        """
+        if not self.is_ready():
+            return "SimpleRAG is not ready. Please check your configuration."
+
+        progress_tracker = None
+        if session_id:
+            progress_tracker = ProgressTracker(session_id, "query_filtered")
+            progress_tracker.update(0, 100, status="starting",
+                                    message=f"Filtered query: {list(filters.keys())}")
         try:
-            # Step 1: Generate query embedding
+            return self._query_normal_mode(question, progress_tracker, filters=filters)
+        except Exception as e:
+            logger.error(f"Error in filtered query: {e}")
+            return f"Error processing your query: {e}"
+
+    def _query_normal_mode(self, question: str, progress_tracker: Optional[ProgressTracker] = None,
+                           filters: Dict[str, Any] = None) -> str:
+        """Query using normal RAG mode, with optional metadata pre-filters."""
+        try:
+            top_k = self.config["top_k"]
+            # Retrieve a larger pool when reranking is active so reranker has good candidates
+            retrieval_k = top_k * 4 if self.reranker else top_k
+
+            # Step 1: Query planning (HyDE + decomposition) or single embedding
             if progress_tracker:
-                progress_tracker.update(20, 100, status="embedding", 
-                                      message="Generating query embedding")
-            
-            query_embedding = self.embedding_service.get_embedding(question)
-            
-            # Step 2: Search for similar chunks
+                progress_tracker.update(15, 100, status="planning", message="Planning retrieval strategy")
+
+            if self.query_planner:
+                plan = self.query_planner.plan(question)
+            else:
+                plan = {"strategy": "simple", "sub_queries": [question], "hyde_docs": []}
+
+            # Step 2: Embed sub-queries + HyDE docs, retrieve for each, RRF-merge
             if progress_tracker:
-                progress_tracker.update(40, 100, status="searching", 
-                                      message="Searching for relevant documents")
-            
-            contexts = self.vector_db_service.search_similar(
-                query_embedding,
-                top_k=self.config["top_k"],
-                collection_name=self.config["collection_name"]
+                progress_tracker.update(30, 100, status="searching", message="Retrieving relevant documents")
+
+            result_lists = []
+            queries_to_embed = list(plan["sub_queries"])
+            hyde_docs = plan.get("hyde_docs", [])
+            # Pair sub-queries with their hyde docs (embed hyde if non-empty, else query)
+            for i, q in enumerate(queries_to_embed):
+                hyde = hyde_docs[i] if i < len(hyde_docs) and hyde_docs[i] else None
+                embed_text = hyde if hyde else q
+                emb = self.embedding_service.get_embedding(embed_text)
+                results = self.vector_db_service.search_similar(
+                    emb,
+                    top_k=retrieval_k,
+                    collection_name=self.config["collection_name"],
+                    filters=filters,
+                )
+                result_lists.append(results)
+
+            contexts = rrf_merge(result_lists) if len(result_lists) > 1 else (result_lists[0] if result_lists else [])
+
+            logger.info(
+                f"Retrieved {len(contexts)} contexts "
+                f"(strategy={plan['strategy']}, sub_queries={len(plan['sub_queries'])})"
             )
-            
-            logger.info(f"Found {len(contexts)} relevant contexts")
-            
+
             if not contexts:
                 if progress_tracker:
-                    progress_tracker.update(100, 100, status="complete", 
-                                          message="No relevant information found")
+                    progress_tracker.update(100, 100, status="complete", message="No relevant information found")
                 return "I couldn't find any relevant information to answer your question. Please ensure documents have been indexed."
-            
-            # Step 3: Generate answer
+
+            # Step 3: Rerank — reorder the larger pool down to top_k
+            if self.reranker and len(contexts) > top_k:
+                if progress_tracker:
+                    progress_tracker.update(55, 100, status="reranking", message="Reranking results")
+                contexts = self.reranker.rerank(question, contexts, top_k)
+            else:
+                contexts = contexts[:top_k]
+
+            # Step 4: Generate answer
             if progress_tracker:
-                progress_tracker.update(60, 100, status="generating", 
-                                      message="Generating answer")
-            
+                progress_tracker.update(65, 100, status="generating", message="Generating answer")
+
             if self.llm_service and self.llm_service.is_available():
                 answer = self.llm_service.generate_answer(question, contexts, rag_mode="normal", progress_tracker=progress_tracker)
             else:
-                # Fallback to raw results
                 answer = self._format_raw_results(contexts)
-            
+
             if progress_tracker:
-                progress_tracker.update(100, 100, status="complete", 
-                                      message="Answer generated successfully")
-            
+                progress_tracker.update(100, 100, status="complete", message="Answer generated successfully")
+
             return answer
-            
+
         except Exception as e:
             logger.error(f"Error in normal mode query: {str(e)}")
             return f"Error processing your query: {str(e)}"
@@ -832,45 +941,51 @@ class EnhancedSimpleRAG:
                 progress_tracker.update(20, 100, status="searching", 
                                       message="Searching documents and knowledge graph")
             
+            top_k = self.config["top_k"]
+            retrieval_k = top_k * 2 if self.reranker else top_k // 2
+
             # Search document chunks
             doc_contexts = self.vector_db_service.search_similar(
                 query_embedding,
-                top_k=self.config["top_k"] // 2,
+                top_k=retrieval_k,
                 collection_name=self.config["collection_name"]
             )
-            
+
             # Search graph elements
             graph_contexts = self.graph_rag_service.search_graph(
                 question,
-                top_k=self.config["top_k"] // 2
+                top_k=top_k // 2
             )
-            
-            # Combine contexts
+
+            # Rerank doc_contexts before combining with graph contexts
+            if self.reranker and len(doc_contexts) > top_k // 2:
+                if progress_tracker:
+                    progress_tracker.update(40, 100, status="reranking", message="Reranking document results")
+                doc_contexts = self.reranker.rerank(question, doc_contexts, top_k // 2)
+
             all_contexts = doc_contexts + graph_contexts
-            
-            logger.info(f"Found {len(doc_contexts)} document contexts and {len(graph_contexts)} graph contexts")
-            logger.info(f"GRAPH DEBUG doc_contexts[0] metadata: {doc_contexts[0]['metadata'] if doc_contexts else 'EMPTY'}")
-            logger.info(f"GRAPH DEBUG graph_contexts types: {[c['metadata'].get('type') for c in graph_contexts[:3]]}")
-            
+
+            logger.info(f"Found {len(doc_contexts)} doc contexts and {len(graph_contexts)} graph contexts")
+
             if not all_contexts:
                 if progress_tracker:
-                    progress_tracker.update(100, 100, status="complete", 
+                    progress_tracker.update(100, 100, status="complete",
                                           message="No relevant information found")
                 return "I couldn't find any relevant information to answer your question in either the documents or knowledge graph."
-            
+
             # Step 3: Prepare graph context for enhanced prompting
             if progress_tracker:
-                progress_tracker.update(50, 100, status="analyzing", 
+                progress_tracker.update(55, 100, status="analyzing",
                                       message="Analyzing graph relationships")
-            
+
             graph_context = {
                 "entities": [ctx for ctx in graph_contexts if ctx['metadata'].get('type') == 'entity'],
                 "relationships": [ctx for ctx in graph_contexts if ctx['metadata'].get('type') == 'relationship']
             }
-            
+
             # Step 4: Generate enhanced answer
             if progress_tracker:
-                progress_tracker.update(70, 100, status="generating", 
+                progress_tracker.update(70, 100, status="generating",
                                       message="Generating graph-enhanced answer")
             
             if self.llm_service and self.llm_service.is_available():
@@ -1245,7 +1360,7 @@ Answer:"""
                         results, exec_error = self.neo4j_service.execute_cypher_query(cypher_query)
                         
                         if not exec_error and results:
-                            # Convert Neo4j results to context format
+                            # Convert Neo4j results to context format (no fake scores)
                             for i, result in enumerate(results[:self.config["top_k"] // 3]):
                                 neo4j_context = {
                                     "text": self._format_neo4j_result_as_text(result),
@@ -1253,9 +1368,9 @@ Answer:"""
                                         "type": "neo4j_result",
                                         "source": "Neo4j Graph Database",
                                         "cypher_query": cypher_query,
-                                        "result_index": i
+                                        "result_index": i,
                                     },
-                                    "score": 0.95 - (i * 0.05)  # Assign high scores to Neo4j results
+                                    "score": None,  # Neo4j results don't have a meaningful similarity score
                                 }
                                 neo4j_contexts.append(neo4j_context)
                             
@@ -1263,10 +1378,21 @@ Answer:"""
                 except Exception as e:
                     logger.warning(f"Neo4j query failed, continuing with Graph RAG only: {e}")
             
-            # Step 3: Combine all contexts
-            all_contexts = doc_contexts + graph_contexts + neo4j_contexts
-            
-            logger.info(f"Hybrid mode: {len(doc_contexts)} doc contexts, {len(graph_contexts)} graph contexts, {len(neo4j_contexts)} Neo4j contexts")
+            # Step 3: Combine and deduplicate contexts by text hash
+            raw_contexts = doc_contexts + graph_contexts + neo4j_contexts
+            seen_hashes: set = set()
+            all_contexts = []
+            for ctx in raw_contexts:
+                text_hash = hash(ctx.get("text", "")[:200])
+                if text_hash not in seen_hashes:
+                    seen_hashes.add(text_hash)
+                    all_contexts.append(ctx)
+
+            logger.info(
+                f"Hybrid mode: {len(doc_contexts)} doc + {len(graph_contexts)} graph + "
+                f"{len(neo4j_contexts)} neo4j → {len(all_contexts)} unique contexts "
+                f"(deduped {len(raw_contexts) - len(all_contexts)})"
+            )
             
             if not all_contexts:
                 if progress_tracker:

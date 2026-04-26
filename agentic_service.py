@@ -1,52 +1,26 @@
 """
-Agentic AI Service using LangChain for autonomous tool selection and multi-step reasoning
-FIXED VERSION with better error handling and iteration limits
+Agentic AI Service using LangChain 1.x create_agent (function-calling, no ReAct prompt).
+Tools: document search, graph search, pageindex deep research, web search, verify.
 """
 
 import logging
 import json
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional
 
-def _import_langchain_agent():
-    """Import AgentExecutor and create_react_agent across LangChain versions."""
-    try:
-        from langchain.agents import create_react_agent, AgentExecutor
-        return AgentExecutor, create_react_agent
-    except ImportError:
-        pass
-    try:
-        from langchain.agents.react.agent import create_react_agent
-        from langchain.agents.agent import AgentExecutor
-        return AgentExecutor, create_react_agent
-    except ImportError:
-        raise ImportError(
-            "LangChain not found. Install with: pip install 'langchain>=0.1.0,<0.3.0'"
-        )
-
-
-AgentExecutor, create_react_agent = _import_langchain_agent()
-
-
-from langchain.tools import Tool
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_core.prompts import PromptTemplate
+from langchain.agents import create_agent
+from langchain_core.tools import Tool
+from langchain_core.messages import HumanMessage, ToolMessage, AIMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from extensions import ProgressTracker
 
 logger = logging.getLogger(__name__)
 
+
 class AgenticRAGService:
-    """
-    Agentic AI service that uses LangChain agents to autonomously select tools
-    and perform multi-step reasoning with your existing RAG components.
-    FIXED VERSION with better error handling.
-    """
-    
     def __init__(self, config, simple_rag_instance):
         self.config = config
         self.simple_rag = simple_rag_instance
-        
-        # Initialize LangChain LLM using Gemini
+
         self.llm = None
         if config.get("gemini_api_key"):
             try:
@@ -55,403 +29,338 @@ class AgenticRAGService:
                     model="gemini-2.0-flash",
                     temperature=0.1,
                 )
-                logger.info("LangChain Gemini LLM initialized with model: gemini-2.0-flash")
+                logger.info("LangChain Gemini LLM initialized: gemini-2.0-flash")
             except Exception as e:
-                logger.error(f"Failed to initialize LangChain Gemini LLM: {e}")
-        
-        # Create tools that wrap your existing RAG functionality
+                logger.error(f"Failed to initialize Gemini LLM: {e}")
+
         self.tools = self._create_tools()
-        
-        # Initialize agent
         self.agent = None
-        self.agent_executor = None
         if self.llm and self.tools:
             self._initialize_agent()
-    
+
+    # ------------------------------------------------------------------
+    # Tool creation
+    # ------------------------------------------------------------------
+
     def _create_tools(self) -> List[Tool]:
-        """Create LangChain tools that wrap your existing RAG functionality."""
         tools = []
-        
-        # Tool 1: Document Search (Normal RAG)
+
         tools.append(Tool(
             name="search_documents",
-            description="""
-            Search through document chunks using semantic similarity.
-            Use this for straightforward factual questions about document content.
-            Input: A specific question or search query as a string.
-            Returns: Relevant document passages with source information.
-            """,
-            func=self._search_documents_tool
+            description=(
+                "Search document chunks using semantic similarity (Normal RAG). "
+                "Use for straightforward factual questions about document content. "
+                "Input: a specific question or search query."
+            ),
+            func=self._search_documents_tool,
         ))
-        
-        # Tool 2: Knowledge Graph Search (Graph RAG)
+
         tools.append(Tool(
             name="search_knowledge_graph",
-            description="""
-            Search through entities and relationships in the knowledge graph.
-            Use this for questions about connections, relationships, or when you need
-            to understand how different entities relate to each other.
-            Input: A question about entities or relationships as a string.
-            Returns: Related entities and their connections.
-            """,
-            func=self._search_graph_tool
+            description=(
+                "Search entities and relationships in the knowledge graph (Graph RAG). "
+                "Use for questions about connections between people, organisations, or concepts. "
+                "Input: a question about entities or relationships."
+            ),
+            func=self._search_graph_tool,
         ))
-        
-        # Tool 3: Hybrid Analysis
+
         tools.append(Tool(
-            name="analyze_with_both_methods",
-            description="""
-            Perform both document search and graph analysis for comprehensive results.
-            Use this for complex questions that might benefit from multiple perspectives
-            or when initial searches don't provide sufficient information.
-            Input: A complex question as a string.
-            Returns: Combined insights from both document and graph analysis.
-            """,
-            func=self._hybrid_analysis_tool
+            name="search_pageindex",
+            description=(
+                "Deep multi-hop research over indexed documents using PageIndex reasoning. "
+                "Use for complex questions that need reading across many pages, multi-step "
+                "reasoning, or when simpler search tools are insufficient. "
+                "Input: a research question."
+            ),
+            func=self._search_pageindex_tool,
         ))
-        
-        # Tool 4: Verify Information
+
+        tools.append(Tool(
+            name="web_search",
+            description=(
+                "Search the internet for current information not present in the knowledge base. "
+                "Use for recent events, public facts, definitions, or anything beyond the "
+                "uploaded documents. "
+                "Input: a search query string."
+            ),
+            func=self._web_search_tool,
+        ))
+
         tools.append(Tool(
             name="verify_information",
-            description="""
-            Cross-check information by searching for supporting or contradicting evidence.
-            Use this when you need to validate claims or find additional confirmation.
-            Input: A statement or claim to verify as a string.
-            Returns: Supporting or contradicting evidence from the knowledge base.
-            """,
-            func=self._verify_information_tool
+            description=(
+                "Cross-check a claim by searching for supporting or contradicting evidence. "
+                "Use when you need to validate a statement or find additional confirmation. "
+                "Input: a statement or claim to verify."
+            ),
+            func=self._verify_information_tool,
         ))
-        
+
         return tools
-    
+
+    # ------------------------------------------------------------------
+    # Agent initialisation (LangChain 1.x create_agent)
+    # ------------------------------------------------------------------
+
     def _initialize_agent(self):
-        """Initialize the LangChain agent with tools and prompt."""
         try:
-            # FIXED: Simplified and more robust prompt
-            prompt = PromptTemplate.from_template("""You are a helpful research assistant with access to a document knowledge base.
-
-Available tools:
-{tools}
-
-Tool Names: {tool_names}
-
-IMPORTANT RULES:
-1. Always use the exact tool names provided: {tool_names}
-2. For simple questions, start with search_documents
-3. For relationship questions, use search_knowledge_graph
-4. If you get sufficient information from one tool, provide your final answer
-5. Don't use the same tool twice with the same input
-6. Keep responses concise and helpful
-
-Use this format:
-
-Question: the input question you must answer
-Thought: think about what to do
-Action: the action to take, must be one of [{tool_names}]
-Action Input: the input to the action
-Observation: the result of the action
-... (this Thought/Action/Action Input/Observation can repeat N times)
-Thought: I now know the final answer
-Final Answer: the final answer to the original input question
-
-Question: {input}
-Thought: {agent_scratchpad}""")
-            
-            # Create the ReAct agent
-            self.agent = create_react_agent(self.llm, self.tools, prompt)
-            
-            max_iter = self.config.get("agentic_max_iterations", 5)
-            self.agent_executor = AgentExecutor(
-                agent=self.agent,
-                tools=self.tools,
-                verbose=True,
-                max_iterations=max_iter,
-                max_execution_time=60,
-                return_intermediate_steps=True,
-                handle_parsing_errors=True,
-                early_stopping_method="generate",
+            system_prompt = (
+                "You are a helpful research assistant with access to a document knowledge base "
+                "and internet search. Use the available tools to answer questions accurately. "
+                "For factual questions about uploaded documents use search_documents. "
+                "For relationship questions use search_knowledge_graph. "
+                "For deep multi-document research use search_pageindex. "
+                "For current events or public facts use web_search. "
+                "To verify claims use verify_information. "
+                "Prefer answering from documents when possible; use web_search to supplement."
             )
-            logger.info(f"LangChain ReAct agent initialized (max_iterations={max_iter})")
-            
-            logger.info("LangChain ReAct agent initialized successfully with strict limits")
-            
+            self.agent = create_agent(
+                model=self.llm,
+                tools=self.tools,
+                system_prompt=system_prompt,
+            )
+            logger.info("LangChain 1.x create_agent initialised (%d tools)", len(self.tools))
         except Exception as e:
-            logger.error(f"Failed to initialize LangChain agent: {e}")
+            logger.error(f"Failed to initialise agent: {e}")
             self.agent = None
-            self.agent_executor = None
-    
+
+    # ------------------------------------------------------------------
+    # Tool implementations
+    # ------------------------------------------------------------------
+
     def _search_documents_tool(self, query: str) -> str:
-        """Tool wrapper for document search using existing Normal RAG."""
         try:
-            logger.debug(f"Agent using document search for: {query}")
-            
-            # FIXED: Add input validation
             if not query or len(query.strip()) < 3:
-                return "Error: Query too short or empty. Please provide a meaningful search query."
-            
-            # Set to normal mode temporarily
+                return "Error: query too short."
             original_mode = self.simple_rag.rag_mode
             self.simple_rag.set_rag_mode("normal")
-            
-            # Use existing query method
             result = self.simple_rag._query_normal_mode(query)
-            
-            # Restore original mode
             self.simple_rag.set_rag_mode(original_mode)
-            
-            # FIXED: Truncate very long results to prevent context overflow
             if len(result) > 1500:
-                result = result[:1500] + "... [truncated for brevity]"
-            
+                result = result[:1500] + "... [truncated]"
             return f"Document search results for '{query}':\n{result}"
-            
         except Exception as e:
             logger.error(f"Error in document search tool: {e}")
             return f"Error searching documents: {str(e)}"
-    
+
     def _search_graph_tool(self, query: str) -> str:
-        """Tool wrapper for knowledge graph search using existing Graph RAG."""
         try:
-            logger.debug(f"Agent using graph search for: {query}")
-            
-            # FIXED: Add input validation
             if not query or len(query.strip()) < 3:
-                return "Error: Query too short or empty. Please provide a meaningful search query."
-            
+                return "Error: query too short."
             if not self.simple_rag.is_graph_ready():
-                return "Knowledge graph not available. Please ensure Graph RAG is properly configured."
-            
-            # Set to graph mode temporarily
+                return "Knowledge graph not available. Please ensure Graph RAG is configured."
             original_mode = self.simple_rag.rag_mode
             self.simple_rag.set_rag_mode("graph")
-            
-            # Use existing graph search
             result = self.simple_rag._query_graph_mode(query)
-            
-            # Restore original mode
             self.simple_rag.set_rag_mode(original_mode)
-            
-            # FIXED: Truncate very long results
             if len(result) > 1500:
-                result = result[:1500] + "... [truncated for brevity]"
-            
+                result = result[:1500] + "... [truncated]"
             return f"Knowledge graph results for '{query}':\n{result}"
-            
         except Exception as e:
             logger.error(f"Error in graph search tool: {e}")
             return f"Error searching knowledge graph: {str(e)}"
-    
-    def _hybrid_analysis_tool(self, query: str) -> str:
-        """Tool that combines both document and graph search for comprehensive analysis."""
+
+    def _search_pageindex_tool(self, query: str) -> str:
         try:
-            logger.debug(f"Agent using hybrid analysis for: {query}")
-            
-            # FIXED: Add input validation
             if not query or len(query.strip()) < 3:
-                return "Error: Query too short or empty. Please provide a meaningful search query."
-            
-            # Get results from both methods (but truncated)
-            doc_results = self._search_documents_tool(query)
-            
-            # Only do graph search if available
-            if self.simple_rag.is_graph_ready():
-                graph_results = self._search_graph_tool(query)
-            else:
-                graph_results = "Graph search not available - Graph RAG not configured."
-            
-            # FIXED: Create more concise combined result
-            combined_result = f"""HYBRID ANALYSIS FOR: {query}
-
-DOCUMENT FINDINGS:
-{doc_results[:700] if len(doc_results) > 700 else doc_results}
-
-GRAPH FINDINGS:
-{graph_results[:700] if len(graph_results) > 700 else graph_results}
-
-This analysis combines document content with relationship insights for a comprehensive view."""
-            
-            return combined_result
-            
+                return "Error: query too short."
+            if not self.simple_rag.is_pageindex_ready():
+                return "PageIndex not available. Try search_documents or search_knowledge_graph instead."
+            result = self.simple_rag.pageindex_service.query(query)
+            answer = result.get("answer", "No answer returned by PageIndex.")
+            if len(answer) > 1500:
+                answer = answer[:1500] + "... [truncated]"
+            return f"PageIndex research results for '{query}':\n{answer}"
         except Exception as e:
-            logger.error(f"Error in hybrid analysis tool: {e}")
-            return f"Error in hybrid analysis: {str(e)}"
-    
-    def _verify_information_tool(self, claim: str) -> str:
-        """Tool to verify information by searching for supporting evidence."""
+            logger.error(f"Error in PageIndex tool: {e}")
+            return f"Error using PageIndex: {str(e)}"
+
+    def _web_search_tool(self, query: str) -> str:
         try:
-            logger.debug(f"Agent verifying information: {claim}")
-            
-            # FIXED: Add input validation
+            if not query or len(query.strip()) < 3:
+                return "Error: query too short."
+            try:
+                from ddgs import DDGS
+            except ImportError:
+                return "Web search not available. Install with: pip install ddgs"
+            with DDGS() as ddgs:
+                raw = list(ddgs.text(query, max_results=5))
+            if not raw:
+                return f"No web results found for '{query}'."
+            lines = [f"Web search results for '{query}':\n"]
+            for i, r in enumerate(raw, 1):
+                title = r.get("title", "No title")
+                body = r.get("body", "")[:200]
+                url = r.get("href", "")
+                lines.append(f"{i}. {title}")
+                lines.append(f"   {body}")
+                lines.append(f"   Source: {url}\n")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.error(f"Error in web search tool: {e}")
+            return f"Web search failed: {str(e)}"
+
+    def _verify_information_tool(self, claim: str) -> str:
+        try:
             if not claim or len(claim.strip()) < 5:
-                return "Error: Claim too short or empty. Please provide a specific claim to verify."
-            
-            # Search for supporting evidence with focused query
+                return "Error: claim too short."
             verification_query = f"evidence about {claim}"
-            
-            # Use document search for verification
             doc_evidence = self._search_documents_tool(verification_query)
-            
-            # FIXED: More focused verification result
-            result = f"""VERIFICATION FOR: {claim}
-
-EVIDENCE FOUND:
-{doc_evidence[:800] if len(doc_evidence) > 800 else doc_evidence}
-
-VERIFICATION STATUS: Based on available evidence in the knowledge base."""
-            
+            result = (
+                f"Verification for: {claim}\n\n"
+                f"Evidence found:\n"
+                f"{doc_evidence[:800] if len(doc_evidence) > 800 else doc_evidence}\n\n"
+                f"Verification status: based on available evidence in the knowledge base."
+            )
             return result
-            
         except Exception as e:
             logger.error(f"Error in verification tool: {e}")
             return f"Error verifying information: {str(e)}"
-    
+
+    # ------------------------------------------------------------------
+    # Main query entry point
+    # ------------------------------------------------------------------
+
     def process_agentic_query(self, query: str, session_id: str = None) -> Dict[str, Any]:
-        """
-        Process a query using the agentic approach with autonomous tool selection.
-        FIXED VERSION with better error handling and limits.
-        """
         if not self.is_available():
             return {
                 "answer": "Agentic AI service not available. Please check Gemini API configuration.",
                 "reasoning_steps": [],
                 "tools_used": [],
-                "success": False
+                "success": False,
             }
-        
-        # FIXED: Add input validation
+
         if not query or len(query.strip()) < 3:
             return {
                 "answer": "Please provide a more detailed question (at least 3 characters).",
                 "reasoning_steps": [],
                 "tools_used": [],
-                "success": False
+                "success": False,
             }
-        
+
         progress_tracker = None
         if session_id:
             progress_tracker = ProgressTracker(session_id, "agentic_query")
-            progress_tracker.update(0, 100, status="starting", 
-                                   message="Starting agentic analysis...")
-        
+            progress_tracker.update(0, 100, status="starting", message="Starting agentic analysis...")
+
         try:
             logger.info(f"Processing agentic query: {query[:100]}...")
-            
+
             if progress_tracker:
-                progress_tracker.update(20, 100, status="planning", 
-                                       message="Agent planning approach...")
-            
-            # FIXED: Let the agent decide which tools to use with strict limits
-            result = self.agent_executor.invoke({
-                "input": query
-            })
-            
+                progress_tracker.update(20, 100, status="planning", message="Agent planning approach...")
+
+            max_iter = self.config.get("agentic_max_iterations", 5)
+            # LangGraph recursion_limit ≈ 2× iterations (each step = 2 graph nodes)
+            result = self.agent.invoke(
+                {"messages": [{"role": "user", "content": query}]},
+                config={"recursion_limit": max_iter * 2 + 2},
+            )
+
             if progress_tracker:
-                progress_tracker.update(80, 100, status="synthesizing", 
-                                       message="Synthesizing final answer...")
-            
-            # FIXED: Extract information about the process with better error handling
+                progress_tracker.update(80, 100, status="synthesizing", message="Synthesising final answer...")
+
+            # Extract final answer from last AI message
+            messages = result.get("messages", [])
+            final_answer = "No answer generated."
+            for msg in reversed(messages):
+                if isinstance(msg, AIMessage) and msg.content:
+                    final_answer = msg.content if isinstance(msg.content, str) else str(msg.content)
+                    break
+
+            # Extract reasoning steps: pair each AIMessage tool_call with its ToolMessage
             reasoning_steps = []
             tools_used = []
-            
-            if "intermediate_steps" in result:
-                for step in result["intermediate_steps"]:
-                    try:
-                        if len(step) >= 2:
-                            # For ReAct agent, step format is (AgentAction, observation)
-                            agent_action = step[0]
-                            observation = step[1]
-                            
-                            # Safely extract tool name
-                            tool_name = getattr(agent_action, 'tool', 'unknown_tool')
-                            tools_used.append(tool_name)
-                            
-                            # Safely extract tool input
-                            tool_input = getattr(agent_action, 'tool_input', 'No input provided')
-                            
-                            # Create safe reasoning step
-                            reasoning_step = {
-                                "tool": str(tool_name),
-                                "input": str(tool_input)[:100] + "..." if len(str(tool_input)) > 100 else str(tool_input),
-                                "reasoning": "Agent selected this tool for the query",
-                                "observation": str(observation)[:200] + "..." if len(str(observation)) > 200 else str(observation)
-                            }
-                            reasoning_steps.append(reasoning_step)
-                    except Exception as e:
-                        logger.warning(f"Error processing reasoning step: {e}")
-                        continue
-            
+            tool_call_map: Dict[str, dict] = {}
+
+            for msg in messages:
+                if isinstance(msg, AIMessage) and msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        tool_name = tc.get("name", "unknown")
+                        tool_input = tc.get("args", {})
+                        tool_id = tc.get("id", "")
+                        tools_used.append(tool_name)
+                        input_str = json.dumps(tool_input) if isinstance(tool_input, dict) else str(tool_input)
+                        tool_call_map[tool_id] = {
+                            "tool": tool_name,
+                            "input": input_str[:200] + "..." if len(input_str) > 200 else input_str,
+                            "observation": "",
+                        }
+                elif isinstance(msg, ToolMessage):
+                    entry = tool_call_map.get(msg.tool_call_id)
+                    if entry is not None:
+                        obs = str(msg.content)
+                        entry["observation"] = obs[:400] + "..." if len(obs) > 400 else obs
+                        reasoning_steps.append(entry)
+
             if progress_tracker:
-                progress_tracker.update(100, 100, status="complete", 
-                                       message="Agentic analysis complete")
-            
-            # FIXED: Extract the final answer safely
-            final_answer = result.get("output", "No answer generated")
-            
+                progress_tracker.update(100, 100, status="complete", message="Agentic analysis complete")
+
             return {
                 "answer": final_answer,
                 "reasoning_steps": reasoning_steps,
-                "tools_used": list(set(tools_used)),
-                "success": True
+                "tools_used": list(dict.fromkeys(tools_used)),  # deduplicate, preserve order
+                "success": True,
             }
-            
+
         except Exception as e:
             logger.error(f"Error in agentic query processing: {e}")
             if progress_tracker:
-                progress_tracker.update(100, 100, status="error", 
-                                       message=f"Error: {str(e)}")
-            
-            # FIXED: Provide more helpful error messages
-            if "parsing" in str(e).lower():
-                error_msg = "The agent had trouble understanding the response format. Please try rephrasing your question."
-            elif "timeout" in str(e).lower() or "time" in str(e).lower():
-                error_msg = "The query took too long to process. Please try a simpler question or break it into smaller parts."
-            elif "iteration" in str(e).lower() or "max_iterations" in str(e).lower():
-                logger.warning("Agentic mode hit iteration cap")
-                error_msg = "The agent reached its thinking limit. Please try asking a more specific question."
+                progress_tracker.update(100, 100, status="error", message=f"Error: {str(e)}")
+
+            if "recursion" in str(e).lower():
+                error_msg = "The agent reached its thinking limit. Please try a more specific question."
+            elif "timeout" in str(e).lower():
+                error_msg = "The query took too long. Please try a simpler question."
             else:
                 error_msg = f"Error in agentic processing: {str(e)}"
-            
+
             return {
                 "answer": error_msg,
                 "reasoning_steps": [],
                 "tools_used": [],
-                "success": False
+                "success": False,
             }
-    
+
+    # ------------------------------------------------------------------
+    # Utility
+    # ------------------------------------------------------------------
+
     def is_available(self) -> bool:
-        """Check if the agentic service is ready for use."""
-        return (self.llm is not None and 
-                self.agent_executor is not None and 
-                self.simple_rag is not None and 
-                self.simple_rag.is_ready())
-    
+        return (
+            self.llm is not None
+            and self.agent is not None
+            and self.simple_rag is not None
+            and self.simple_rag.is_ready()
+        )
+
     def get_available_tools(self) -> List[Dict[str, str]]:
-        """Get information about available tools."""
         return [
-            {
-                "name": tool.name,
-                "description": tool.description.strip()
-            }
-            for tool in self.tools
+            {"name": t.name, "description": t.description.strip()}
+            for t in self.tools
         ]
-    
+
     def get_agentic_stats(self) -> Dict[str, Any]:
-        """Get statistics about the agentic service. Safe to call even if init failed."""
         try:
-            executor = getattr(self, "agent_executor", None)
-            max_iter = getattr(executor, "max_iterations", None) if executor else None
             tools = getattr(self, "tools", [])
             simple_rag = getattr(self, "simple_rag", None)
+            web_search_available = False
+            try:
+                from ddgs import DDGS  # noqa: F401
+                web_search_available = True
+            except ImportError:
+                pass
             return {
                 "service_available": self.is_available(),
                 "llm_configured": getattr(self, "llm", None) is not None,
-                "agent_initialized": executor is not None,
+                "agent_initialized": getattr(self, "agent", None) is not None,
                 "tools_count": len(tools),
                 "available_tools": [t.name for t in tools],
+                "web_search_available": web_search_available,
                 "underlying_rag_ready": simple_rag.is_ready() if simple_rag else False,
                 "graph_rag_ready": simple_rag.is_graph_ready() if simple_rag else False,
-                "max_iterations": max_iter or self.config.get("agentic_max_iterations", 5),
-                "max_execution_time": 60,
+                "pageindex_ready": simple_rag.is_pageindex_ready() if simple_rag else False,
+                "max_iterations": self.config.get("agentic_max_iterations", 5),
             }
         except Exception as e:
             logger.warning(f"get_agentic_stats failed: {e}")

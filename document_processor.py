@@ -1,5 +1,9 @@
 """
-Document processor for extracting text and creating chunks
+Document processor for extracting text and creating chunks.
+
+PDF extraction uses pymupdf (fitz) for better layout handling.
+PPTX extraction uses python-pptx (slide-level chunking preserves context).
+PyPDF2 kept as fallback only.
 """
 
 import os
@@ -8,10 +12,23 @@ import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
-# Document processing libraries
-import PyPDF2
 import docx
 from bs4 import BeautifulSoup
+
+# pymupdf is the primary PDF extractor (already in requirements)
+try:
+    import fitz as _fitz  # pymupdf
+    _FITZ_AVAILABLE = True
+except ImportError:
+    import PyPDF2 as _PyPDF2  # fallback
+    _FITZ_AVAILABLE = False
+
+# PPTX support (python-pptx)
+try:
+    from pptx import Presentation as _Presentation
+    _PPTX_AVAILABLE = True
+except ImportError:
+    _PPTX_AVAILABLE = False
 
 from extensions import ProgressTracker
 
@@ -19,14 +36,15 @@ logger = logging.getLogger(__name__)
 
 class DocumentProcessor:
     """Enhanced document processor that supports both normal and graph RAG modes."""
-    
+
     def __init__(self, config):
         self.chunk_size = config["chunk_size"]
         self.chunk_overlap = config["chunk_overlap"]
         self.rag_mode = config.get("rag_mode", "normal")
-        
-        # Supported file extensions
+
         self.supported_extensions = {'.pdf', '.txt', '.docx', '.html', '.htm'}
+        if _PPTX_AVAILABLE:
+            self.supported_extensions.add('.pptx')
         
         logger.info(f"DocumentProcessor initialized with chunk_size={self.chunk_size}, rag_mode={self.rag_mode}")
     
@@ -109,6 +127,8 @@ class DocumentProcessor:
                 return self._extract_from_docx(file_path, progress_tracker)
             elif extension in ['.html', '.htm']:
                 return self._extract_from_html(file_path, progress_tracker)
+            elif extension == '.pptx':
+                return self._extract_from_pptx(file_path, progress_tracker)
             else:
                 raise ValueError(f"Unsupported file format: {extension}")
         
@@ -119,49 +139,119 @@ class DocumentProcessor:
                                        message=f"Error extracting text: {str(e)}")
             raise
     
-    def _extract_from_pdf(self, file_path: str, 
+    def _extract_from_pdf(self, file_path: str,
                          progress_tracker: Optional[ProgressTracker] = None) -> str:
-        """Extract text from PDF file with better error handling."""
+        """Extract text from PDF using pymupdf (better layout/table handling than PyPDF2)."""
+        if _FITZ_AVAILABLE:
+            return self._extract_pdf_fitz(file_path, progress_tracker)
+        return self._extract_pdf_pypdf2_fallback(file_path, progress_tracker)
+
+    def _extract_pdf_fitz(self, file_path: str,
+                          progress_tracker: Optional[ProgressTracker] = None) -> str:
+        """pymupdf extraction — preserves column order, handles tables as text blocks."""
         try:
-            text_parts = []
-            
-            with open(file_path, 'rb') as file:
-                reader = PyPDF2.PdfReader(file)
-                total_pages = len(reader.pages)
-                
-                if total_pages == 0:
-                    logger.warning(f"PDF file has no pages: {file_path}")
-                    return ""
-                
-                logger.debug(f"Extracting text from {total_pages} pages")
-                
-                for i, page in enumerate(reader.pages):
-                    try:
-                        page_text = page.extract_text()
-                        if page_text.strip():  # Only add non-empty pages
-                            text_parts.append(page_text)
-                        
-                        if progress_tracker and total_pages > 0:
-                            progress_percentage = int(((i + 1) / total_pages) * 100)
-                            progress_tracker.update(progress_percentage, 100, 
-                                                   message=f"Extracting page {i + 1} of {total_pages}")
-                    
-                    except Exception as e:
-                        logger.warning(f"Error extracting text from page {i + 1}: {e}")
-                        continue
-            
-            extracted_text = "\n".join(text_parts)
-            
-            if not extracted_text.strip():
+            doc = _fitz.open(file_path)
+            total_pages = len(doc)
+            if total_pages == 0:
+                return ""
+
+            parts = []
+            for i, page in enumerate(doc):
+                # "text" mode with "blocks" sorts by reading order
+                page_text = page.get_text("text")
+                if page_text.strip():
+                    parts.append(page_text)
+                if progress_tracker:
+                    pct = int(((i + 1) / total_pages) * 100)
+                    progress_tracker.update(pct, 100, message=f"Extracting page {i + 1}/{total_pages}")
+            doc.close()
+
+            extracted = "\n".join(parts)
+            if not extracted.strip():
                 logger.warning(f"No text extracted from PDF: {file_path}")
                 return ""
-            
-            logger.info(f"Successfully extracted {len(extracted_text)} characters from PDF")
-            return extracted_text
-            
+            logger.info(f"pymupdf extracted {len(extracted)} chars from {total_pages}-page PDF")
+            return extracted
         except Exception as e:
-            logger.error(f"Error reading PDF file {file_path}: {str(e)}")
-            raise RuntimeError(f"Failed to extract text from PDF: {str(e)}")
+            logger.error(f"pymupdf extraction failed for {file_path}: {e}")
+            raise RuntimeError(f"Failed to extract PDF text: {e}")
+
+    def _extract_pdf_pypdf2_fallback(self, file_path: str,
+                                     progress_tracker: Optional[ProgressTracker] = None) -> str:
+        """PyPDF2 fallback when pymupdf is not available."""
+        try:
+            import PyPDF2
+            text_parts = []
+            with open(file_path, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                total_pages = len(reader.pages)
+                for i, page in enumerate(reader.pages):
+                    try:
+                        t = page.extract_text()
+                        if t and t.strip():
+                            text_parts.append(t)
+                    except Exception:
+                        pass
+                    if progress_tracker:
+                        pct = int(((i + 1) / total_pages) * 100)
+                        progress_tracker.update(pct, 100, message=f"Extracting page {i + 1}/{total_pages}")
+            return "\n".join(text_parts)
+        except Exception as e:
+            raise RuntimeError(f"Failed to extract PDF text: {e}")
+
+    def _extract_from_pptx(self, file_path: str,
+                            progress_tracker: Optional[ProgressTracker] = None) -> str:
+        """
+        Extract text from PPTX slide-by-slide.
+
+        Each slide becomes one logical block: title + body + table cells.
+        This preserves the atomic context of each slide (e.g. 'Market Size' slide
+        keeps its heading, data points, and footer together).
+        """
+        if not _PPTX_AVAILABLE:
+            raise RuntimeError(
+                "python-pptx is not installed. Run: pip install python-pptx"
+            )
+        try:
+            prs = _Presentation(file_path)
+            slide_texts = []
+            total = len(prs.slides)
+
+            for i, slide in enumerate(prs.slides):
+                slide_parts = []
+
+                # Slide title (if present)
+                if slide.shapes.title and slide.shapes.title.text.strip():
+                    slide_parts.append(f"## {slide.shapes.title.text.strip()}")
+
+                for shape in slide.shapes:
+                    # Text frames (body text)
+                    if shape.has_text_frame:
+                        for para in shape.text_frame.paragraphs:
+                            t = para.text.strip()
+                            if t and t != slide_parts[0].lstrip("# ") if slide_parts else True:
+                                slide_parts.append(t)
+
+                    # Tables — serialized as markdown-style rows
+                    if shape.has_table:
+                        for row in shape.table.rows:
+                            cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                            if cells:
+                                slide_parts.append(" | ".join(cells))
+
+                if slide_parts:
+                    slide_texts.append(f"[Slide {i + 1}]\n" + "\n".join(slide_parts))
+
+                if progress_tracker:
+                    pct = int(((i + 1) / total) * 100)
+                    progress_tracker.update(pct, 100, message=f"Extracting slide {i + 1}/{total}")
+
+            extracted = "\n\n".join(slide_texts)
+            logger.info(f"python-pptx extracted {len(extracted)} chars from {total}-slide PPTX")
+            return extracted
+        except Exception as e:
+            logger.error(f"PPTX extraction failed for {file_path}: {e}")
+            raise RuntimeError(f"Failed to extract PPTX text: {e}")
     
     def _extract_from_txt(self, file_path: str, 
                          progress_tracker: Optional[ProgressTracker] = None) -> str:
@@ -298,102 +388,186 @@ class DocumentProcessor:
             logger.error(f"Error reading HTML file {file_path}: {str(e)}")
             raise RuntimeError(f"Failed to extract text from HTML file: {str(e)}")
     
-    def chunk_text(self, text: str, metadata: dict, 
+    # ── heading patterns: markdown, ALL CAPS labels, numbered sections, slide headers ──
+    _HEADING_RE = re.compile(
+        r'^(?:'
+        r'#{1,4}\s+.+|'                          # ## Markdown heading
+        r'\[Slide \d+\]|'                         # [Slide N] from PPTX extractor
+        r'[A-Z][A-Z0-9 \t\-:]{4,}$|'            # ALL CAPS LABEL
+        r'\d{1,2}\.(?:\d+\.?)?\s+[A-Z].+|'      # 1. or 2.1 Numbered section
+        r'(?:SECTION|CHAPTER|PART)\s+\w+'        # SECTION X / CHAPTER Y
+        r')',
+        re.MULTILINE,
+    )
+
+    def chunk_text(self, text: str, metadata: dict,
                    progress_tracker: Optional[ProgressTracker] = None) -> List[Dict[str, Any]]:
-        """Split text into overlapping chunks optimized for the current RAG mode."""
+        """
+        Structure-aware chunking.
+
+        1. Detect section headings (markdown, ALL CAPS, numbered, slide markers).
+        2. Group text into sections; each section header is stored as section_path.
+        3. Sub-split sections larger than chunk_size using sentence boundaries.
+        4. Prepend the heading path as a contextual header on the chunk text so the
+           embedding carries section context (the 'late chunking' analogue without
+           changing the embedding model).
+
+        Falls back to sentence-based splitting when no headings are detected.
+        """
         if not text or not text.strip():
             logger.warning("Empty text provided for chunking")
             return []
-        
+
         if progress_tracker:
-            progress_tracker.update(0, 100, status="chunking", 
-                                   message="Splitting text into chunks")
-        
-        # Adjust chunk size based on RAG mode
+            progress_tracker.update(0, 100, status="chunking", message="Splitting text into chunks")
+
         effective_chunk_size = self.chunk_size
         if self.rag_mode == "graph":
-            # Use larger chunks for graph mode to capture more context for entity extraction
             effective_chunk_size = int(self.chunk_size * 1.5)
-            logger.debug(f"Using larger chunks for graph mode: {effective_chunk_size}")
-        
-        # Clean and normalize the text
-        cleaned_text = self._clean_text(text)
-        
-        # Split into sentences for better chunk boundaries
-        sentences = self._split_into_sentences(cleaned_text)
-        total_sentences = len(sentences)
-        
-        if total_sentences == 0:
-            logger.warning("No sentences found in text")
+
+        # Detect sections on line-normalized (but not whitespace-collapsed) text
+        # so heading patterns can match against line starts.
+        line_normalized = text.replace('\r\n', '\n').replace('\r', '\n')
+        sections = self._split_into_sections(line_normalized)
+
+        # If no sections detected, fall back to sentence-based approach on cleaned text
+        if len(sections) == 1 and sections[0][0] is None:
+            return self._chunk_by_sentences(self._clean_text(text), metadata, effective_chunk_size, progress_tracker)
+
+        chunks: List[Dict[str, Any]] = []
+        total_sections = len(sections)
+
+        for sec_idx, (heading, body) in enumerate(sections):
+            body = self._clean_text(body)
+            if not body.strip():
+                continue
+
+            section_path = heading or metadata.get("source", "")
+            contextual_header = f"[Section: {section_path}]\n" if section_path else ""
+
+            if len(body) <= effective_chunk_size:
+                # Whole section fits in one chunk
+                chunk_text = contextual_header + body
+                chunk_meta = metadata.copy()
+                chunk_meta.update({
+                    "chunk_index": len(chunks),
+                    "section_path": section_path,
+                    "contextual_header": contextual_header.strip(),
+                    "rag_mode": self.rag_mode,
+                    "chunk_size": len(chunk_text),
+                    "chunk_text_preview": body[:100],
+                })
+                chunks.append({"text": chunk_text, "metadata": chunk_meta})
+            else:
+                # Sub-split large section by sentences
+                sub_chunks = self._chunk_by_sentences(body, metadata, effective_chunk_size)
+                for sub in sub_chunks:
+                    sub["text"] = contextual_header + sub["text"]
+                    sub["metadata"]["section_path"] = section_path
+                    sub["metadata"]["contextual_header"] = contextual_header.strip()
+                    sub["metadata"]["chunk_index"] = len(chunks)
+                    chunks.append(sub)
+
+            if progress_tracker:
+                pct = int(((sec_idx + 1) / total_sections) * 100)
+                progress_tracker.update(pct, 100, message=f"Chunking section {sec_idx + 1}/{total_sections}")
+
+        if progress_tracker:
+            progress_tracker.update(100, 100, status="chunking_complete",
+                                    message=f"Created {len(chunks)} chunks")
+
+        avg = sum(len(c["text"]) for c in chunks) // len(chunks) if chunks else 0
+        logger.info(f"Structure-aware chunking: {len(chunks)} chunks, avg {avg} chars (mode: {self.rag_mode})")
+        return chunks
+
+    def _split_into_sections(self, text: str) -> List[tuple]:
+        """
+        Split text on detected headings.
+
+        Returns list of (heading_str | None, body_str) tuples.
+        If no headings found, returns [(None, full_text)].
+        """
+        lines = text.split("\n")
+        sections = []
+        current_heading = None
+        current_body: List[str] = []
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped and self._HEADING_RE.match(stripped):
+                # Save accumulated body under previous heading
+                if current_body:
+                    sections.append((current_heading, "\n".join(current_body).strip()))
+                current_heading = stripped.lstrip("#").strip()
+                current_body = []
+            else:
+                current_body.append(line)
+
+        # Flush last section
+        if current_body:
+            sections.append((current_heading, "\n".join(current_body).strip()))
+
+        # If only one section with no heading, headings weren't found
+        if len(sections) == 1 and sections[0][0] is None:
+            return sections
+
+        return [s for s in sections if s[1].strip()]
+
+    def _chunk_by_sentences(self, text: str, metadata: dict,
+                             chunk_size: int = None,
+                             progress_tracker: Optional[ProgressTracker] = None) -> List[Dict[str, Any]]:
+        """Original sentence-boundary chunking — used as sub-splitter for large sections."""
+        if chunk_size is None:
+            chunk_size = self.chunk_size
+
+        sentences = self._split_into_sentences(text)
+        if not sentences:
             return []
-        
-        logger.debug(f"Found {total_sentences} sentences for chunking")
-        
-        chunks = []
-        current_chunk = ""
-        current_sentence_count = 0
-        
+
+        chunks: List[Dict[str, Any]] = []
+        current = ""
+        sent_count = 0
+
         for i, sentence in enumerate(sentences):
             sentence = sentence.strip()
             if not sentence:
                 continue
-            
-            # Check if adding this sentence would exceed chunk size
-            potential_chunk = current_chunk + " " + sentence if current_chunk else sentence
-            
-            if len(potential_chunk) > effective_chunk_size and current_chunk:
-                # Save current chunk
-                chunk_metadata = metadata.copy()
-                chunk_metadata.update({
+
+            candidate = (current + " " + sentence).strip() if current else sentence
+
+            if len(candidate) > chunk_size and current:
+                chunk_meta = metadata.copy()
+                chunk_meta.update({
                     "chunk_index": len(chunks),
-                    "chunk_text_preview": current_chunk[:100] + "..." if len(current_chunk) > 100 else current_chunk,
+                    "chunk_text_preview": current[:100],
                     "rag_mode": self.rag_mode,
-                    "sentence_count": current_sentence_count,
-                    "chunk_size": len(current_chunk)
+                    "sentence_count": sent_count,
+                    "chunk_size": len(current),
                 })
-                
-                chunks.append({
-                    "text": current_chunk,
-                    "metadata": chunk_metadata
-                })
-                
-                # Start new chunk with overlap
-                overlap_sentences = self._get_overlap_sentences(sentences, i, current_sentence_count)
-                current_chunk = " ".join(overlap_sentences) + " " + sentence if overlap_sentences else sentence
-                current_sentence_count = len(overlap_sentences) + 1
+                chunks.append({"text": current, "metadata": chunk_meta})
+
+                overlap = self._get_overlap_sentences(sentences, i, sent_count)
+                current = (" ".join(overlap) + " " + sentence).strip() if overlap else sentence
+                sent_count = len(overlap) + 1
             else:
-                # Add sentence to current chunk
-                current_chunk = potential_chunk
-                current_sentence_count += 1
-            
-            # Update progress
-            if progress_tracker and total_sentences > 0:
-                progress_percentage = int(((i + 1) / total_sentences) * 100)
-                progress_tracker.update(progress_percentage, 100, 
-                                       message=f"Processing sentence {i + 1} of {total_sentences}")
-        
-        # Add the last chunk if it exists
-        if current_chunk.strip():
-            chunk_metadata = metadata.copy()
-            chunk_metadata.update({
+                current = candidate
+                sent_count += 1
+
+            if progress_tracker:
+                pct = int(((i + 1) / len(sentences)) * 100)
+                progress_tracker.update(pct, 100, message=f"Sentence {i + 1}/{len(sentences)}")
+
+        if current.strip():
+            chunk_meta = metadata.copy()
+            chunk_meta.update({
                 "chunk_index": len(chunks),
-                "chunk_text_preview": current_chunk[:100] + "..." if len(current_chunk) > 100 else current_chunk,
+                "chunk_text_preview": current[:100],
                 "rag_mode": self.rag_mode,
-                "sentence_count": current_sentence_count,
-                "chunk_size": len(current_chunk)
+                "sentence_count": sent_count,
+                "chunk_size": len(current),
             })
-            
-            chunks.append({
-                "text": current_chunk,
-                "metadata": chunk_metadata
-            })
-        
-        if progress_tracker:
-            progress_tracker.update(100, 100, status="chunking_complete",
-                                   message=f"Created {len(chunks)} chunks from document")
-        
-        logger.info(f"Created {len(chunks)} chunks from document (mode: {self.rag_mode}, avg size: {sum(len(c['text']) for c in chunks) // len(chunks) if chunks else 0})")
-        
+            chunks.append({"text": current, "metadata": chunk_meta})
+
         return chunks
     
     def _clean_text(self, text: str) -> str:

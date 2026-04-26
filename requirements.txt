@@ -24,3 +24,8 @@ python-dotenv>=1.0.0
 ragas>=0.1.0
 datasets>=2.14.0
 pyyaml>=6.0
+# Agentic web search (no API key required)
+ddgs>=0.0.1
+# Domain-tuned document parsing
+python-pptx>=0.6.21
+pdfplumber>=0.10.0
