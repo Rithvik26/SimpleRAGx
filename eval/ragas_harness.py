@@ -26,7 +26,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 GROUND_TRUTH_PATH = os.path.join(os.path.dirname(__file__), "ground_truth.yaml")
 DEFAULT_OUT       = os.path.join(os.path.dirname(__file__), "baseline_phase1.json")
-TEST_PDF          = os.path.join(os.path.dirname(os.path.dirname(__file__)), "techcorp_q1_2025_report.pdf")
+EVAL_DIR          = os.path.dirname(__file__)
+TEST_PDFS         = [
+    os.path.join(EVAL_DIR, "amd_2022_10k.pdf"),
+    os.path.join(EVAL_DIR, "boeing_2022_10k.pdf"),
+]
 
 SUPPORTED_MODES = ["normal", "graph", "neo4j", "pageindex"]
 
@@ -88,22 +92,24 @@ def _query_mode(mode: str, question: str, cfg: Dict) -> Dict[str, Any]:
         # Build a ConfigManager from the plain cfg dict
         cm = ConfigManager.__new__(ConfigManager)
         cm.config_path = "/tmp/ragas_eval_config.json"
-        cm.force_fresh_start = False
+        cm.force_fresh_start = True
         cm.config = dict(cfg)
         cm.config["rag_mode"] = mode
 
         rag = SimpleRAG(cm)
-        if not rag.is_ready():
-            print(f"    Indexing {TEST_PDF} for mode={mode}…")
-            rag.process_document(TEST_PDF)
+        for pdf in TEST_PDFS:
+            print(f"    Indexing {os.path.basename(pdf)} for mode={mode}…")
+            rag.index_document(pdf)
         _rag_cache[mode] = rag
     else:
         rag = _rag_cache[mode]
 
     result = rag.query(question)
+    if isinstance(result, str):
+        result = {"answer": result, "sources": []}
     answer   = result.get("answer", "")
     sources  = result.get("sources", result.get("context_chunks", []))
-    contexts = [s.get("text", s.get("content", "")) for s in sources if s]
+    contexts = [s.get("text", s.get("content", "")) if isinstance(s, dict) else str(s) for s in sources if s]
     return {"answer": answer, "contexts": contexts or [""]}
 
 
@@ -123,24 +129,23 @@ def _compute_ragas(samples: List[Dict], gemini_api_key: str) -> Dict[str, float]
         from ragas.llms import llm_factory
         from ragas.embeddings import embedding_factory
         ragas_llm = llm_factory(
-            model="gemini/gemini-2.0-flash",
+            model="gemini/gemini-2.5-flash",
             provider="litellm",
         )
         ragas_emb = embedding_factory(
-            model="gemini/text-embedding-004",
+            model="gemini/gemini-embedding-001",
             provider="litellm",
         )
     except Exception:
-        # Fallback: LangchainLLMWrapper still works in 0.4.x (just deprecated)
         from ragas.llms import LangchainLLMWrapper
         from ragas.embeddings import LangchainEmbeddingsWrapper
         lc_llm = ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             google_api_key=gemini_api_key,
             temperature=0,
         )
         lc_emb = GoogleGenerativeAIEmbeddings(
-            model="models/embedding-001",
+            model="gemini-embedding-001",
             google_api_key=gemini_api_key,
         )
         ragas_llm = LangchainLLMWrapper(lc_llm)
