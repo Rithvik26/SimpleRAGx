@@ -27,9 +27,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 GROUND_TRUTH_PATH = os.path.join(os.path.dirname(__file__), "ground_truth.yaml")
 DEFAULT_OUT       = os.path.join(os.path.dirname(__file__), "baseline_phase1.json")
 EVAL_DIR          = os.path.dirname(__file__)
+DOCS_DIR          = os.path.join(EVAL_DIR, "docs")
 TEST_PDFS         = [
-    os.path.join(EVAL_DIR, "amd_2022_10k.pdf"),
-    os.path.join(EVAL_DIR, "boeing_2022_10k.pdf"),
+    os.path.join(DOCS_DIR, "amd_2022_10k.pdf"),
+    os.path.join(DOCS_DIR, "boeing_2022_10k.pdf"),
 ]
 
 SUPPORTED_MODES = ["normal", "graph", "neo4j", "pageindex"]
@@ -57,8 +58,8 @@ def _build_cfg(collection_suffix: str = "") -> Dict:
         "neo4j_password":        os.environ.get("NEO4J_PASSWORD", ""),
         "neo4j_database":        os.environ.get("NEO4J_DATABASE", "neo4j"),
         "neo4j_enabled":         bool(os.environ.get("NEO4J_URI")),
-        "collection_name":       f"ragas_eval{collection_suffix}",
-        "graph_collection_name": f"ragas_eval_graph{collection_suffix}",
+        "collection_name":       f"ragas_financebench{collection_suffix}",
+        "graph_collection_name": f"ragas_financebench_graph{collection_suffix}",
         "rag_mode":              "normal",
         "setup_completed":       True,
         "preferred_llm":         "raw",
@@ -66,7 +67,7 @@ def _build_cfg(collection_suffix: str = "") -> Dict:
         "chunk_size":            1000,
         "chunk_overlap":         200,
         "top_k":                 5,
-        "rate_limit":            60,
+        "rate_limit":            300,
         "enable_cache":          False,
         "cache_dir":             None,
         "max_entities_per_chunk": 20,
@@ -85,21 +86,32 @@ _rag_cache: Dict[str, Any] = {}  # mode -> SimpleRAG instance (reuse across ques
 
 def _query_mode(mode: str, question: str, cfg: Dict) -> Dict[str, Any]:
     """Run a single question through the given mode. Returns {answer, contexts}."""
-    from config import ConfigManager
-    from simple_rag import SimpleRAG
-
     if mode not in _rag_cache:
-        # Build a ConfigManager from the plain cfg dict
+        from config import ConfigManager
+        from simple_rag import SimpleRAG
+        from qdrant_client import QdrantClient
+
         cm = ConfigManager.__new__(ConfigManager)
         cm.config_path = "/tmp/ragas_eval_config.json"
-        cm.force_fresh_start = True
+        cm.force_fresh_start = False
         cm.config = dict(cfg)
         cm.config["rag_mode"] = mode
 
+        # Check if already indexed — skip if collection has points
+        try:
+            qc = QdrantClient(url=cfg["qdrant_url"], api_key=cfg["qdrant_api_key"])
+            pts = qc.get_collection(cfg["collection_name"]).points_count
+            already_indexed = pts > 100
+        except Exception:
+            already_indexed = False
+
         rag = SimpleRAG(cm)
-        for pdf in TEST_PDFS:
-            print(f"    Indexing {os.path.basename(pdf)} for mode={mode}…")
-            rag.index_document(pdf)
+        if not already_indexed:
+            for pdf in TEST_PDFS:
+                print(f"    Indexing {os.path.basename(pdf)} for mode={mode}…")
+                rag.index_document(pdf)
+        else:
+            print(f"    Reusing existing index ({pts} points) — skipping re-index")
         _rag_cache[mode] = rag
     else:
         rag = _rag_cache[mode]

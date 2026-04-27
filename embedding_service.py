@@ -7,7 +7,7 @@ import time
 import requests
 import concurrent.futures
 from typing import List, Optional
-from extensions import RateLimiter, EmbeddingCache, rate_limited, ProgressTracker
+from extensions import RateLimiter, EmbeddingCache, ProgressTracker
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +43,9 @@ class EmbeddingService:
         
         return cleaned_text
     
-    @rate_limited(RateLimiter(calls_per_minute=60))
     def _get_embedding_from_api(self, text: str, retry_count: int = 3) -> List[float]:
         """Generate embedding vector for text using Gemini API with retry logic."""
+        self.rate_limiter.wait_for_permission()
         prepared_text = self._prepare_text_for_embedding(text)
         
         # Use the latest Gemini embedding endpoint
@@ -120,7 +120,41 @@ class EmbeddingService:
         error_msg = f"Failed to generate embedding after {retry_count} attempts. Last error: {last_error}"
         logger.error(error_msg)
         raise RuntimeError(error_msg)
-    
+
+    def _batch_embed_from_api(self, texts: List[str], batch_size: int = 50) -> List[List[float]]:
+        """Call batchEmbedContents — one HTTP request per batch, not one per text."""
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents"
+        headers = {"Content-Type": "application/json"}
+        params = {"key": self.api_key}
+
+        all_embeddings: List[List[float]] = []
+        for start in range(0, len(texts), batch_size):
+            batch = [self._prepare_text_for_embedding(t) for t in texts[start:start + batch_size]]
+            data = {
+                "requests": [
+                    {
+                        "model": "models/gemini-embedding-001",
+                        "content": {"parts": [{"text": t}]},
+                        "taskType": "RETRIEVAL_DOCUMENT",
+                        "outputDimensionality": self.embedding_dimension,
+                    }
+                    for t in batch
+                ]
+            }
+            self.rate_limiter.wait_for_permission()
+            response = requests.post(url, headers=headers, params=params, json=data, timeout=60)
+            if response.status_code == 429:
+                time.sleep(5)
+                self.rate_limiter.wait_for_permission()
+                response = requests.post(url, headers=headers, params=params, json=data, timeout=60)
+            response.raise_for_status()
+            embeddings = [e["values"] for e in response.json().get("embeddings", [])]
+            if len(embeddings) != len(batch):
+                raise ValueError(f"batchEmbedContents: expected {len(batch)}, got {len(embeddings)}")
+            all_embeddings.extend(embeddings)
+            logger.info(f"Batch embedded {min(start + len(batch), len(texts))}/{len(texts)} texts")
+        return all_embeddings
+
     def get_embedding(self, text: str) -> List[float]:
         """Get embedding for text, using cache if enabled."""
         if not text or not text.strip():
@@ -263,91 +297,29 @@ class EmbeddingService:
             logger.error(f"Error clearing cache: {str(e)}")
             return False
     
-    def get_embeddings_batch(self, texts: List[str], max_workers: int = 5, 
-                         progress_tracker: Optional[ProgressTracker] = None) -> List[List[float]]:
-        """
-        Generate embeddings for multiple texts in parallel.
-        
-        Performance improvement: ~5x faster for batches of 10+ texts
-        Uses ThreadPoolExecutor for concurrent API calls with rate limiting.
-        
-        Args:
-            texts: List of text strings to embed
-            max_workers: Maximum number of parallel API calls (default: 5)
-            progress_tracker: Optional progress tracker for UI updates
-        
-        Returns:
-            List of embedding vectors (same order as input texts)
-        
-        Example:
-            texts = ["text1", "text2", "text3", ...]
-            embeddings = embedding_service.get_embeddings_batch(texts, max_workers=5)
-            # 10 texts: 2000ms sequential Ã¢â€ â€™ 400ms parallel (5x faster)
-        """
+    def get_embeddings_batch(self, texts: List[str], max_workers: int = 5,
+                             progress_tracker=None) -> List[List[float]]:
+        """Generate embeddings using batchEmbedContents (50 texts per HTTP call)."""
         if not texts:
             return []
-        
-        # Single text - use regular method
         if len(texts) == 1:
             return [self.get_embedding(texts[0])]
-        
-        logger.info(f"Starting batch embedding for {len(texts)} texts with {max_workers} workers")
+
+        logger.info(f"Starting batch embedding for {len(texts)} texts via batchEmbedContents")
         start_time = time.time()
-        
-        embeddings = [None] * len(texts)
-        completed = 0
-        failed = 0
-        
-        def embed_with_index(index: int, text: str) -> tuple:
-            """Embed text and return with its index for proper ordering."""
-            try:
-                embedding = self.get_embedding(text)
-                return index, embedding, None
-            except Exception as e:
-                logger.error(f"Batch embedding error at index {index}: {e}")
-                return index, None, str(e)
-        
-        # Process in parallel with ThreadPoolExecutor
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks
-            future_to_index = {
-                executor.submit(embed_with_index, i, text): i 
-                for i, text in enumerate(texts)
-            }
-            
-            # Collect results as they complete
-            for future in concurrent.futures.as_completed(future_to_index):
-                index, embedding, error = future.result()
-                
-                if embedding is not None:
-                    embeddings[index] = embedding
-                    completed += 1
-                else:
-                    failed += 1
-                    logger.warning(f"Failed to embed text at index {index}: {error}")
-                
-                # Update progress tracker
-                if progress_tracker:
-                    progress_tracker.update(
-                        completed + failed, len(texts),
-                        status="embedding",
-                        message=f"Embedded {completed}/{len(texts)} texts ({failed} failed)"
-                    )
-        
-        # Calculate performance metrics
+
+        try:
+            embeddings = self._batch_embed_from_api(texts, batch_size=50)
+            if progress_tracker:
+                progress_tracker.update(len(texts), len(texts), status="embedding",
+                                        message=f"Embedded {len(texts)} texts")
+        except Exception as e:
+            logger.warning(f"batchEmbedContents failed ({e}), falling back to sequential")
+            embeddings = [self.get_embedding(t) for t in texts]
+
         elapsed = time.time() - start_time
-        avg_time_per_text = elapsed / len(texts) if texts else 0
-        
-        logger.info(f"Batch embedding completed: {completed} success, {failed} failed in {elapsed:.2f}s "
-                f"(avg {avg_time_per_text:.3f}s per text)")
-        
-        # Filter out failed embeddings (None values)
-        valid_embeddings = [emb for emb in embeddings if emb is not None]
-        
-        if len(valid_embeddings) < len(texts):
-            logger.warning(f"Some embeddings failed: {len(valid_embeddings)}/{len(texts)} successful")
-        
-        return valid_embeddings
+        logger.info(f"Batch embedding done: {len(embeddings)}/{len(texts)} in {elapsed:.2f}s")
+        return embeddings
 
 
     # ======================================================================

@@ -82,7 +82,7 @@ class EnhancedSimpleRAG:
 
         # 6. Agentic AI Service (after all other services are ready)
         try:
-            if self.is_ready() and AgenticRAGService is not None:  # Only initialize if basic services are ready
+            if self.is_ready() and AgenticRAGService is not None and self.config.get("enable_agentic_ai", True):
                 self.agentic_service = AgenticRAGService(self.config, self)
                 logger.info(" Agentic AI service initialized")
             else:
@@ -510,17 +510,38 @@ class EnhancedSimpleRAG:
                     chunks,
                     progress_tracker
                 )
-                
+
+                # Also push to Neo4j if configured — no re-extraction needed
+                neo4j_stats = {}
+                if self.neo4j_service:
+                    try:
+                        if progress_tracker:
+                            progress_tracker.update(92, 100, status="neo4j",
+                                                message="Storing graph in Neo4j")
+                        import os as _os
+                        file_name = _os.path.basename(file_path)
+                        neo4j_stats = self.neo4j_service.store_entities_and_relationships(
+                            graph_result["entities"],
+                            graph_result["relationships"],
+                            document_name=file_name,
+                        )
+                        self.neo4j_service.create_indexes()
+                        logger.info(
+                            f"Neo4j: {neo4j_stats.get('entities_created',0)} entities, "
+                            f"{neo4j_stats.get('relationships_created',0)} relationships"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Neo4j storage skipped: {e}")
+
                 if progress_tracker:
                     progress_tracker.update(100, 100, status="complete",
                                         message="Graph RAG indexing complete")
-                
+
                 elapsed = time.time() - start_time
                 logger.info(f"Graph RAG indexing completed in {elapsed:.2f}s")
-                
-                # Extract counts from graph_stats
+
                 graph_stats = graph_result.get("graph_stats", {})
-                
+
                 return {
                     "success": True,
                     "chunks_indexed": len(chunks),
@@ -529,68 +550,14 @@ class EnhancedSimpleRAG:
                     "collections": [doc_collection, self.config.get("graph_collection_name", "graph_entities")],
                     "mode": "graph",
                     "time_elapsed": round(elapsed, 2),
-                    "graph_stats": graph_stats
+                    "graph_stats": graph_stats,
+                    "neo4j_stats": neo4j_stats,
                 }
             
-            # Neo4j-only mode: extract entities into Neo4j (no vector DB needed)
+            # neo4j mode: alias for graph — graph mode now writes to both Qdrant and Neo4j
             elif self.rag_mode == "neo4j":
-                if not self.neo4j_service:
-                    raise RuntimeError("Neo4j service not configured. Check neo4j_uri, neo4j_username, neo4j_password and neo4j_enabled.")
-
-                if progress_tracker:
-                    progress_tracker.update(75, 100, status="graph_extraction",
-                                        message="Extracting entities and relationships for Neo4j")
-
-                all_entities = []
-                all_relationships = []
-                total_chunks = len(chunks)
-
-                for i, chunk in enumerate(chunks):
-                    try:
-                        chunk_id = f"chunk_{i}_{int(time.time())}"
-                        graph_data = self.graph_rag_service.graph_extractor.extract_entities_and_relationships(
-                            chunk["text"], chunk_id
-                        )
-                        for entity in graph_data.get("entities", []):
-                            entity["metadata"] = chunk.get("metadata", {})
-                        for rel in graph_data.get("relationships", []):
-                            rel["metadata"] = chunk.get("metadata", {})
-                        all_entities.extend(graph_data.get("entities", []))
-                        all_relationships.extend(graph_data.get("relationships", []))
-                        if progress_tracker:
-                            p = 75 + int((i + 1) / total_chunks * 15)
-                            progress_tracker.update(p, 100, message=f"Extracted from chunk {i+1}/{total_chunks}")
-                        time.sleep(0.2)
-                    except Exception as e:
-                        logger.error(f"Error processing chunk {i}: {e}")
-                        continue
-
-                merged_entities = self.graph_rag_service._merge_similar_entities(all_entities)
-                validated_rels = self.graph_rag_service._validate_relationships(all_relationships, merged_entities)
-
-                if progress_tracker:
-                    progress_tracker.update(90, 100, status="storing", message="Storing in Neo4j")
-
-                import os as _os
-                file_name = _os.path.basename(file_path)
-                stats = self.neo4j_service.store_entities_and_relationships(
-                    merged_entities, validated_rels, document_name=file_name
-                )
-                self.neo4j_service.create_indexes()
-
-                if progress_tracker:
-                    progress_tracker.update(100, 100, status="complete",
-                                        message=f"Neo4j indexing complete: {stats['entities_created']} entities, {stats['relationships_created']} relationships")
-
-                elapsed = time.time() - start_time
-                return {
-                    "success": True,
-                    "chunks_indexed": len(chunks),
-                    "entities_extracted": stats["entities_created"],
-                    "relationships_extracted": stats["relationships_created"],
-                    "mode": "neo4j",
-                    "time_elapsed": round(elapsed, 2)
-                }
+                self.rag_mode = "graph"
+                return self.index_document(file_path, progress_tracker)
 
             # Hybrid mode: vector store + graph collection + Neo4j
             elif self.rag_mode == "hybrid_neo4j":

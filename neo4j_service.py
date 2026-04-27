@@ -7,6 +7,7 @@ import logging
 from typing import List, Dict, Any, Optional, Tuple
 import json
 from datetime import datetime
+from entity_canonicalizer import canonical_id as _canonical_id
 
 import litellm
 
@@ -77,8 +78,9 @@ class Neo4jService:
     def create_indexes(self):
         """Create necessary indexes for performance."""
         indexes = [
-            "CREATE INDEX entity_name_idx IF NOT EXISTS FOR (e:Entity) ON (e.name)",
-            "CREATE INDEX entity_type_idx IF NOT EXISTS FOR (e:Entity) ON (e.type)",
+            "CREATE INDEX entity_id_idx   IF NOT EXISTS FOR (e:Entity)   ON (e.id)",
+            "CREATE INDEX entity_name_idx IF NOT EXISTS FOR (e:Entity)   ON (e.name)",
+            "CREATE INDEX entity_type_idx IF NOT EXISTS FOR (e:Entity)   ON (e.type)",
             "CREATE INDEX document_name_idx IF NOT EXISTS FOR (d:Document) ON (d.name)",
         ]
         
@@ -90,111 +92,182 @@ class Neo4jService:
         except Neo4jError as e:
             logger.error(f"Error creating indexes: {e}")
     
-    def store_entities_and_relationships(self, 
-                                       entities: List[Dict[str, Any]], 
-                                       relationships: List[Dict[str, Any]],
-                                       document_name: str = None) -> Dict[str, int]:
-        """Store entities and relationships in Neo4j."""
+    _BATCH_SIZE = 500  # UNWIND batch size — safe for AuraDB free tier memory
+
+    def store_entities_and_relationships(self,
+                                         entities: List[Dict[str, Any]],
+                                         relationships: List[Dict[str, Any]],
+                                         document_name: str = None) -> Dict[str, int]:
+        """
+        Store entities and relationships using UNWIND batches.
+        1 network round-trip per 500 entities instead of 1 per entity — ~100x faster on cloud Neo4j.
+        """
         stats = {"entities_created": 0, "relationships_created": 0, "errors": 0}
-        
+        ts = datetime.now().isoformat()
+
         try:
             with self._session() as session:
-                # Create document node if provided
+                # ── Document node (single call) ──────────────────────────────
                 if document_name:
-                    session.run("""
+                    session.run(
+                        """
                         MERGE (d:Document {name: $doc_name})
-                        ON CREATE SET d.created_at = $timestamp
-                        ON MATCH SET d.updated_at = $timestamp
-                        """, doc_name=document_name, timestamp=datetime.now().isoformat())
-                
-                # Store entities
-                for entity in entities:
+                        ON CREATE SET d.created_at = $ts
+                        ON MATCH  SET d.updated_at = $ts
+                        """,
+                        doc_name=document_name, ts=ts,
+                    )
+
+                # ── Entities — UNWIND in batches ─────────────────────────────
+                entity_rows = []
+                for e in entities:
+                    eid = e.get("id") or _canonical_id(
+                        e.get("name", ""), e.get("type", "UNKNOWN")
+                    )
+                    entity_rows.append({
+                        "id":           eid,
+                        "name":         e.get("name", ""),
+                        "type":         e.get("type", "UNKNOWN"),
+                        "aliases":      json.dumps(e.get("aliases", [e.get("name", "")])),
+                        "description":  e.get("description", ""),
+                        "source_chunks": json.dumps(e.get("source_chunks", [])),
+                        "source_texts": json.dumps(e.get("source_texts", [])),
+                        "merged_from":  e.get("merged_from", 1),
+                        "ts":           ts,
+                        "doc_name":     document_name or "",
+                    })
+
+                for i in range(0, len(entity_rows), self._BATCH_SIZE):
+                    batch = entity_rows[i:i + self._BATCH_SIZE]
                     try:
-                        self._store_entity(session, entity, document_name)
-                        stats["entities_created"] += 1
-                    except Exception as e:
-                        logger.error(f"Error storing entity {entity.get('name', 'unknown')}: {e}")
-                        stats["errors"] += 1
-                
-                # Store relationships
-                for rel in relationships:
+                        result = session.run(
+                            """
+                            UNWIND $rows AS row
+                            MERGE (e:Entity {id: row.id})
+                            SET e.name         = row.name,
+                                e.type         = row.type,
+                                e.aliases      = row.aliases,
+                                e.description  = row.description,
+                                e.source_chunks = row.source_chunks,
+                                e.source_texts  = row.source_texts,
+                                e.merged_from  = row.merged_from,
+                                e.updated_at   = row.ts
+                            WITH e, row
+                            WHERE row.doc_name <> ''
+                            MATCH (d:Document {name: row.doc_name})
+                            MERGE (e)-[:EXTRACTED_FROM]->(d)
+                            """,
+                            rows=batch,
+                        )
+                        result.consume()
+                        stats["entities_created"] += len(batch)
+                    except Exception as ex:
+                        logger.error(f"Entity batch {i//self._BATCH_SIZE + 1} failed: {ex}")
+                        stats["errors"] += len(batch)
+
+                # ── Relationships — UNWIND in batches ────────────────────────
+                # Build name→id lookup from the entities we just stored so we can
+                # resolve relationship endpoints even when source_type is unknown.
+                name_to_id = {e.get("name", ""): e.get("id") or _canonical_id(e.get("name",""), e.get("type","UNKNOWN"))
+                              for e in entities if e.get("name")}
+
+                rel_rows = []
+                for r in relationships:
+                    source = r.get("source", "")
+                    target = r.get("target", "")
+                    if not source or not target:
+                        continue
+                    rel_rows.append({
+                        "source_id":    name_to_id.get(source) or _canonical_id(source, r.get("source_type", "UNKNOWN")),
+                        "target_id":    name_to_id.get(target) or _canonical_id(target, r.get("target_type", "UNKNOWN")),
+                        "source_name":  source,
+                        "target_name":  target,
+                        "relationship": r.get("relationship", ""),
+                        "description":  r.get("description", ""),
+                        "source_chunk": r.get("source_chunk", ""),
+                        "source_text":  r.get("source_text", ""),
+                        "ts":           ts,
+                    })
+
+                for i in range(0, len(rel_rows), self._BATCH_SIZE):
+                    batch = rel_rows[i:i + self._BATCH_SIZE]
                     try:
-                        self._store_relationship(session, rel, document_name)
-                        stats["relationships_created"] += 1
-                    except Exception as e:
-                        logger.error(f"Error storing relationship {rel.get('source', '')} -> {rel.get('target', '')}: {e}")
-                        stats["errors"] += 1
-                        
+                        result = session.run(
+                            """
+                            UNWIND $rows AS row
+                            MATCH (s:Entity {id: row.source_id})
+                            MATCH (t:Entity {id: row.target_id})
+                            MERGE (s)-[r:RELATES_TO {relationship: row.relationship}]->(t)
+                            SET r.description  = row.description,
+                                r.source_chunk = row.source_chunk,
+                                r.source_text  = row.source_text,
+                                r.updated_at   = row.ts
+                            """,
+                            rows=batch,
+                        )
+                        result.consume()
+                        stats["relationships_created"] += len(batch)
+                    except Exception as ex:
+                        logger.error(f"Relationship batch {i//self._BATCH_SIZE + 1} failed: {ex}")
+                        stats["errors"] += len(batch)
+
         except Neo4jError as e:
             logger.error(f"Database error during storage: {e}")
             stats["errors"] += 1
-        
-        logger.info(f"Storage complete: {stats}")
+
+        logger.info(
+            f"Neo4j storage complete: {stats['entities_created']} entities, "
+            f"{stats['relationships_created']} relationships, {stats['errors']} errors"
+        )
         return stats
-    
+
     def _store_entity(self, session, entity: Dict[str, Any], document_name: str = None):
-        """Store a single entity in Neo4j, MERGing on stable canonical id."""
-        from entity_canonicalizer import canonical_id as _canonical_id
-        entity_id = entity.get("id") or _canonical_id(
+        """Single-entity write — kept for compatibility. Prefer store_entities_and_relationships for bulk."""
+        eid = entity.get("id") or _canonical_id(
             entity.get("name", ""), entity.get("type", "UNKNOWN")
         )
-        query = """
-        MERGE (e:Entity {id: $id})
-        SET e.name = $name,
-            e.type = $type,
-            e.aliases = $aliases,
-            e.description = $description,
-            e.source_chunks = $source_chunks,
-            e.source_texts = $source_texts,
-            e.merged_from = $merged_from,
-            e.updated_at = $timestamp
-        """
-
-        params = {
-            "id": entity_id,
-            "name": entity.get("name", ""),
-            "type": entity.get("type", "UNKNOWN"),
-            "aliases": json.dumps(entity.get("aliases", [entity.get("name", "")])),
-            "description": entity.get("description", ""),
-            "source_chunks": json.dumps(entity.get("source_chunks", [])),
-            "source_texts": json.dumps(entity.get("source_texts", [])),
-            "merged_from": entity.get("merged_from", 1),
-            "timestamp": datetime.now().isoformat(),
-        }
-
-        session.run(query, **params)
-
-        # Link to document if provided
+        ts = datetime.now().isoformat()
+        session.run(
+            """
+            MERGE (e:Entity {id: $id})
+            SET e.name=$name, e.type=$type, e.aliases=$aliases,
+                e.description=$description, e.source_chunks=$sc,
+                e.source_texts=$st, e.merged_from=$mf, e.updated_at=$ts
+            """,
+            id=eid, name=entity.get("name",""), type=entity.get("type","UNKNOWN"),
+            aliases=json.dumps(entity.get("aliases",[entity.get("name","")])),
+            description=entity.get("description",""),
+            sc=json.dumps(entity.get("source_chunks",[])),
+            st=json.dumps(entity.get("source_texts",[])),
+            mf=entity.get("merged_from",1), ts=ts,
+        )
         if document_name:
-            session.run("""
-                MATCH (e:Entity {id: $entity_id}), (d:Document {name: $doc_name})
-                MERGE (e)-[:EXTRACTED_FROM]->(d)
-                """, entity_id=entity_id, doc_name=document_name)
-    
+            session.run(
+                "MATCH (e:Entity {id:$eid}),(d:Document {name:$dn}) MERGE (e)-[:EXTRACTED_FROM]->(d)",
+                eid=eid, dn=document_name,
+            )
+
     def _store_relationship(self, session, relationship: Dict[str, Any], document_name: str = None):
-        """Store a single relationship in Neo4j."""
-        query = """
-        MATCH (source:Entity {name: $source_name})
-        MATCH (target:Entity {name: $target_name})
-        MERGE (source)-[r:RELATES_TO]->(target)
-        SET r.relationship = $relationship,
-            r.description = $description,
-            r.source_chunk = $source_chunk,
-            r.source_text = $source_text,
-            r.updated_at = $timestamp
-        """
-        
-        params = {
-            "source_name": relationship.get("source", ""),
-            "target_name": relationship.get("target", ""),
-            "relationship": relationship.get("relationship", ""),
-            "description": relationship.get("description", ""),
-            "source_chunk": relationship.get("source_chunk", ""),
-            "source_text": relationship.get("source_text", ""),
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        session.run(query, **params)
+        """Single-relationship write — kept for compatibility."""
+        source = relationship.get("source", "")
+        target = relationship.get("target", "")
+        if not source or not target:
+            return
+        session.run(
+            """
+            MATCH (s:Entity {id: $sid})
+            MATCH (t:Entity {id: $tid})
+            MERGE (s)-[r:RELATES_TO {relationship: $rel}]->(t)
+            SET r.description=$desc, r.source_chunk=$sc, r.source_text=$st, r.updated_at=$ts
+            """,
+            sid=_canonical_id(source, relationship.get("source_type","UNKNOWN")),
+            tid=_canonical_id(target, relationship.get("target_type","UNKNOWN")),
+            rel=relationship.get("relationship",""),
+            desc=relationship.get("description",""),
+            sc=relationship.get("source_chunk",""),
+            st=relationship.get("source_text",""),
+            ts=datetime.now().isoformat(),
+        )
     
     def _validate_cypher(self, cypher: str) -> Tuple[bool, Optional[str]]:
         """Run EXPLAIN on cypher in a read-only tx. Returns (valid, error_or_None)."""

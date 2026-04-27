@@ -2,6 +2,7 @@
 Vector database service using Qdrant with comprehensive error handling
 """
 
+import hashlib
 import logging
 import time
 from typing import List, Dict, Any, Optional
@@ -332,9 +333,12 @@ class VectorDBService:
                     logger.warning(f"Invalid embedding at index {i}, skipping document")
                     continue
                 
-                # Create point
+                # Deterministic ID from source + chunk index so re-uploading same doc upserts, not duplicates
+                source = doc.get("metadata", {}).get("source", "") or doc.get("text", "")[:64]
+                raw_id = f"{source}:{i}"
+                point_id = int(hashlib.md5(raw_id.encode()).hexdigest()[:16], 16) % (2**63)
                 point = models.PointStruct(
-                    id=i + int(time.time() * 1000),  # Unique ID
+                    id=point_id,
                     vector=embedding,
                     payload={
                         "text": doc["text"],

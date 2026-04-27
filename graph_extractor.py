@@ -9,9 +9,11 @@ Real-world reference: production Graph RAG systems (LightRAG, Microsoft GraphRAG
 a lightweight NER stage (GLiNER / spaCy) followed by a focused LLM pass for relationships only.
 """
 
+import concurrent.futures
 import json
 import logging
 import re
+import threading
 import time
 import os
 from typing import Dict, Any, List, Optional
@@ -46,6 +48,7 @@ _LABEL_TO_TYPE = {
 
 # ── Singleton GLiNER model (loaded once, reused across all chunks) ────────────
 _gliner_model = None
+_gliner_lock = threading.Lock()  # PyTorch inter-op thread pool is shared; serialize inference
 
 def _get_gliner_model():
     global _gliner_model
@@ -187,11 +190,12 @@ class GraphExtractor:
 
         cleaned = re.sub(r"\s+", " ", text.strip())
 
-        # ── Stage 1: GLiNER entity extraction ──────────────────────────────
+        # ── Stage 1: GLiNER entity extraction (serialized — shared PyTorch thread pool) ──
         try:
             model = _get_gliner_model()
             t0 = time.time()
-            raw = model.predict_entities(cleaned, _GLINER_LABELS, threshold=0.5)
+            with _gliner_lock:
+                raw = model.predict_entities(cleaned, _GLINER_LABELS, threshold=0.5)
             logger.debug(f"GLiNER: {len(raw)} spans in {round(time.time()-t0, 3)}s")
         except Exception as e:
             logger.error(f"GLiNER extraction failed: {e}")
@@ -246,34 +250,48 @@ class GraphExtractor:
         return {"entities": entities, "relationships": relationships}
 
     def extract_from_multiple_chunks(
-        self, chunks: List[str], progress_callback=None
+        self, chunks: List[str], progress_callback=None, max_workers: int = 8
     ) -> Dict[str, Any]:
-        """Extract from all chunks sequentially. GLiNER needs no inter-call delay."""
-        all_entities      = []
-        all_relationships = []
+        """Extract from all chunks in parallel (GLiNER local + LLM concurrent)."""
         total = len(chunks)
-        logger.info(f"Starting hybrid extraction from {total} chunks")
+        logger.info(f"Starting hybrid extraction from {total} chunks ({max_workers} workers)")
+        t_start = time.time()
 
-        for i, chunk in enumerate(chunks):
-            try:
-                chunk_id = f"chunk_{i}_{int(time.time())}"
-                result   = self.extract_entities_and_relationships(chunk, chunk_id)
-                all_entities.extend(result.get("entities", []))
-                all_relationships.extend(result.get("relationships", []))
+        results: List[Optional[Dict]] = [None] * total
+        completed = 0
 
+        def _process(args):
+            i, chunk = args
+            chunk_id = f"chunk_{i}"
+            return i, self.extract_entities_and_relationships(chunk, chunk_id)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_process, (i, c)): i for i, c in enumerate(chunks)}
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    i, result = future.result()
+                    results[i] = result
+                except Exception as e:
+                    logger.error(f"Error on chunk {futures[future]}: {e}")
+                completed += 1
                 if progress_callback:
-                    progress_callback(i + 1, total, f"Chunk {i+1}/{total}")
+                    progress_callback(completed, total, f"Chunk {completed}/{total}")
 
-            except Exception as e:
-                logger.error(f"Error on chunk {i}: {e}")
+        all_entities: List[Dict] = []
+        all_relationships: List[Dict] = []
+        for r in results:
+            if r:
+                all_entities.extend(r.get("entities", []))
+                all_relationships.extend(r.get("relationships", []))
 
+        elapsed = round(time.time() - t_start, 1)
         logger.info(
             f"Extraction complete: {len(all_entities)} entities, "
-            f"{len(all_relationships)} relationships across {total} chunks"
+            f"{len(all_relationships)} relationships from {total} chunks in {elapsed}s"
         )
         return {
-            "entities":        all_entities,
-            "relationships":   all_relationships,
+            "entities":         all_entities,
+            "relationships":    all_relationships,
             "chunks_processed": total,
         }
 
