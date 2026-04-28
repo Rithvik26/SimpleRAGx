@@ -97,7 +97,7 @@ def _extract_relationships_llm(
     try:
         os.environ.setdefault("GEMINI_API_KEY", api_key)
         resp = litellm.completion(
-            model="gemini/gemini-2.5-flash-lite",
+            model="gemini/gemini-2.5-flash",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=1024,

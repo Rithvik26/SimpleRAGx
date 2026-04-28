@@ -84,8 +84,12 @@ class QueryPlanner:
             f"Question: {query}\n\nSub-questions (JSON array):"
         )
         try:
-            raw = self._call(prompt, max_tokens=250)
-            subs = json.loads(_strip_fence(raw))
+            raw = self._call(prompt, max_tokens=400)
+            cleaned = _strip_fence(raw)
+            import re as _re
+            m = _re.search(r'\[.*?\]', cleaned, _re.DOTALL)
+            cleaned = _re.sub(r'\s+', ' ', m.group(0)) if m else cleaned
+            subs = json.loads(cleaned)
             if isinstance(subs, list) and subs:
                 # Original query always first so it's always retrieved against
                 unique = [query] + [s for s in subs if isinstance(s, str) and s.strip() != query]

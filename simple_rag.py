@@ -16,7 +16,7 @@ from embedding_service import EmbeddingService
 from vector_db_service import VectorDBService
 from graph_rag_service import GraphRAGService
 from document_processor import DocumentProcessor
-from llm_service import LLMService
+from llm_service import LLMService, _clean_source_name
 from extensions import ProgressTracker
 from domain_config import get_domain
 from metadata_extractor import MetadataExtractor
@@ -985,7 +985,7 @@ class EnhancedSimpleRAG:
         results = ["=== SEARCH RESULTS (Raw Mode) ===\n"]
         
         for i, ctx in enumerate(contexts):
-            filename = ctx['metadata'].get('filename', 'Unknown')
+            filename = _clean_source_name(ctx['metadata'])
             score = ctx.get('score', 0)
             text = ctx['text']
             
@@ -1004,7 +1004,7 @@ class EnhancedSimpleRAG:
         if doc_contexts:
             results.append("DOCUMENT CONTEXTS:")
             for i, ctx in enumerate(doc_contexts):
-                filename = ctx['metadata'].get('filename', 'Unknown')
+                filename = _clean_source_name(ctx['metadata'])
                 score = ctx.get('score', 0)
                 results.append(f"  Doc {i+1} ({filename}, Score: {score:.3f}): {ctx['text'][:200]}...")
         
@@ -1024,7 +1024,7 @@ class EnhancedSimpleRAG:
             if relationships:
                 results.append("  Relationships:")
                 for ctx in relationships:
-                    source = ctx['metadata'].get('source', 'Unknown')
+                    source = ctx['metadata'].get('source', ctx['metadata'].get('filename', ctx['metadata'].get('doc_name', 'Unknown')))
                     target = ctx['metadata'].get('target', 'Unknown')
                     rel_type = ctx['metadata'].get('relationship', 'unknown')
                     score = ctx.get('score', 0)
@@ -1421,7 +1421,7 @@ Answer:"""
         if doc_contexts:
             results.append("DOCUMENT CONTEXTS:")
             for i, ctx in enumerate(doc_contexts[:3]):
-                filename = ctx['metadata'].get('filename', 'Unknown')
+                filename = _clean_source_name(ctx['metadata'])
                 score = ctx.get('score', 0)
                 results.append(f"  Doc {i+1} ({filename}, Score: {score:.3f}): {ctx['text'][:200]}...")
         
@@ -1441,7 +1441,7 @@ Answer:"""
             if relationships:
                 results.append("  Relationships:")
                 for ctx in relationships[:5]:
-                    source = ctx['metadata'].get('source', 'Unknown')
+                    source = ctx['metadata'].get('source', ctx['metadata'].get('filename', ctx['metadata'].get('doc_name', 'Unknown')))
                     target = ctx['metadata'].get('target', 'Unknown')
                     rel_type = ctx['metadata'].get('relationship', 'unknown')
                     score = ctx.get('score', 0)

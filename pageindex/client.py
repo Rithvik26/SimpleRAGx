@@ -10,7 +10,7 @@ import PyPDF2
 from .page_index import page_index
 from .page_index_md import md_to_tree
 from .retrieve import get_document, get_document_structure, get_page_content
-from .utils import ConfigLoader, remove_fields
+from .utils import ConfigLoader, remove_fields, get_page_tokens
 
 META_INDEX = "_meta.json"
 
@@ -76,12 +76,13 @@ class PageIndexClient:
                 if_add_node_id='yes',
                 if_add_doc_description='yes'
             )
-            # Extract per-page text so queries don't need the original PDF
-            pages = []
-            with open(file_path, 'rb') as f:
-                pdf_reader = PyPDF2.PdfReader(f)
-                for i, page in enumerate(pdf_reader.pages, 1):
-                    pages.append({'page': i, 'content': page.extract_text() or ''})
+            # Extract per-page text using the improved pipeline:
+            # PyMuPDF + pdfplumber tables + header-strip (handles nav-links like Boeing TOC)
+            page_token_list = get_page_tokens(file_path, model=None, pdf_parser="PyMuPDF")
+            pages = [
+                {'page': i + 1, 'content': text}
+                for i, (text, _) in enumerate(page_token_list)
+            ]
 
             self.documents[doc_id] = {
                 'id': doc_id,

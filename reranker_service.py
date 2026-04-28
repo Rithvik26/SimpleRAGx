@@ -70,10 +70,16 @@ class RerankerService:
                 model=_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
-                max_tokens=150,
+                max_tokens=512,
             )
             raw = resp.choices[0].message.content.strip()
             raw = _strip_fence(raw)
+            # Extract the first valid JSON array of integers, ignoring any preamble/thinking
+            import re as _re
+            m = _re.search(r'\[\s*\d[\d,\s]*\]', raw, _re.DOTALL)
+            raw = m.group(0) if m else raw
+            # Collapse whitespace inside array so json.loads handles multiline arrays
+            raw = _re.sub(r'\s+', ' ', raw)
             indices = json.loads(raw)
 
             if not isinstance(indices, list):

@@ -58,8 +58,8 @@ def _build_cfg(collection_suffix: str = "") -> Dict:
         "neo4j_password":        os.environ.get("NEO4J_PASSWORD", ""),
         "neo4j_database":        os.environ.get("NEO4J_DATABASE", "neo4j"),
         "neo4j_enabled":         bool(os.environ.get("NEO4J_URI")),
-        "collection_name":       f"ragas_financebench{collection_suffix}",
-        "graph_collection_name": f"ragas_financebench_graph{collection_suffix}",
+        "collection_name":       "simpleragx_benchmark",
+        "graph_collection_name": "simple_rag_graph",
         "rag_mode":              "normal",
         "setup_completed":       True,
         "preferred_llm":         "raw",
@@ -89,7 +89,6 @@ def _query_mode(mode: str, question: str, cfg: Dict) -> Dict[str, Any]:
     if mode not in _rag_cache:
         from config import ConfigManager
         from simple_rag import SimpleRAG
-        from qdrant_client import QdrantClient
 
         cm = ConfigManager.__new__(ConfigManager)
         cm.config_path = "/tmp/ragas_eval_config.json"
@@ -97,21 +96,8 @@ def _query_mode(mode: str, question: str, cfg: Dict) -> Dict[str, Any]:
         cm.config = dict(cfg)
         cm.config["rag_mode"] = mode
 
-        # Check if already indexed — skip if collection has points
-        try:
-            qc = QdrantClient(url=cfg["qdrant_url"], api_key=cfg["qdrant_api_key"])
-            pts = qc.get_collection(cfg["collection_name"]).points_count
-            already_indexed = pts > 100
-        except Exception:
-            already_indexed = False
-
         rag = SimpleRAG(cm)
-        if not already_indexed:
-            for pdf in TEST_PDFS:
-                print(f"    Indexing {os.path.basename(pdf)} for mode={mode}…")
-                rag.index_document(pdf)
-        else:
-            print(f"    Reusing existing index ({pts} points) — skipping re-index")
+        print(f"    Using existing index (no re-indexing)")
         _rag_cache[mode] = rag
     else:
         rag = _rag_cache[mode]

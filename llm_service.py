@@ -17,6 +17,17 @@ logger = logging.getLogger(__name__)
 
 GEMINI_MODEL = "gemini/gemini-2.5-flash"
 
+
+def _clean_source_name(metadata: dict) -> str:
+    """Return a human-readable source name from chunk metadata."""
+    company = metadata.get('company_name', '')
+    raw = metadata.get('source', metadata.get('filename', metadata.get('doc_name', '')))
+    # Strip the hash prefix (32 hex chars + underscore) if present
+    clean = re.sub(r'^[0-9a-f]{32}_', '', raw) if raw else ''
+    if company and clean:
+        return f"{company} ({clean})"
+    return company or clean or 'Unknown Document'
+
 # Silence LiteLLM's verbose success logs
 litellm.success_callback = []
 
@@ -218,7 +229,7 @@ class LLMService:
 
         context_sections = []
         for ctx in contexts:
-            filename = ctx['metadata'].get('filename', 'Unknown Document')
+            filename = _clean_source_name(ctx['metadata'])
             text = ctx['text']
             context_sections.append(f"[Source: {filename}]\n{text}")
         context_text = "\n\n---\n\n".join(context_sections)
@@ -260,7 +271,7 @@ ANSWER:"""
         if document_contexts:
             doc_sections = []
             for ctx in document_contexts[:3]:
-                filename = ctx['metadata'].get('filename', 'Unknown Document')
+                filename = _clean_source_name(ctx['metadata'])
                 doc_sections.append(f"[Source: {filename}]\n{ctx['text']}")
             document_text = "\n\n".join(doc_sections)
 
@@ -284,7 +295,7 @@ ANSWER:"""
         if relationship_contexts:
             rel_list = []
             for ctx in relationship_contexts[:5]:
-                source = ctx['metadata'].get('source', 'Unknown')
+                source = _clean_source_name(ctx['metadata'])
                 target = ctx['metadata'].get('target', 'Unknown')
                 rel = ctx['metadata'].get('relationship', 'related_to')
                 discovery = ctx['metadata'].get('discovery_method', 'vector_search')
@@ -455,7 +466,7 @@ ANSWER:"""
         if document_contexts:
             doc_sections = []
             for ctx in document_contexts[:5]:
-                filename = ctx['metadata'].get('filename', 'Unknown Document')
+                filename = _clean_source_name(ctx['metadata'])
                 doc_sections.append(f"[Source: {filename}]\n{ctx['text']}")
             document_text = "\n\n".join(doc_sections)
 
@@ -479,7 +490,7 @@ ANSWER:"""
         if relationship_contexts:
             rel_list = []
             for ctx in relationship_contexts[:10]:
-                source = ctx['metadata'].get('source', 'Unknown')
+                source = _clean_source_name(ctx['metadata'])
                 target = ctx['metadata'].get('target', 'Unknown')
                 rel = ctx['metadata'].get('relationship', 'related_to')
                 discovery = ctx['metadata'].get('discovery_method', 'vector_search')

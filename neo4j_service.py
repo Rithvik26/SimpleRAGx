@@ -283,7 +283,7 @@ class Neo4jService:
     def _call_cypher_llm(self, prompt: str) -> str:
         """Single LLM call to gemini-2.5-flash-lite; returns stripped Cypher text."""
         resp = litellm.completion(
-            model="gemini/gemini-2.5-flash-lite",
+            model="gemini/gemini-2.5-flash",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=256,

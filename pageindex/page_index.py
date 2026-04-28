@@ -117,9 +117,8 @@ def toc_detector_single_page(content, model=None):
     Please note: abstract,summary, notation list, figure list, table list, etc. are not table of contents."""
 
     response = llm_completion(model=model, prompt=prompt)
-    # print('response', response)
-    json_content = extract_json(response)    
-    return json_content['toc_detected']
+    json_content = extract_json(response)
+    return json_content.get('toc_detected', 'no')
 
 
 def check_if_toc_extraction_is_complete(content, toc, model=None):
@@ -137,7 +136,7 @@ def check_if_toc_extraction_is_complete(content, toc, model=None):
     prompt = prompt + '\n Document:\n' + content + '\n Table of contents:\n' + toc
     response = llm_completion(model=model, prompt=prompt)
     json_content = extract_json(response)
-    return json_content['completed']
+    return json_content.get('completed', 'no')
 
 
 def check_if_toc_transformation_is_complete(content, toc, model=None):
@@ -155,7 +154,7 @@ def check_if_toc_transformation_is_complete(content, toc, model=None):
     prompt = prompt + '\n Raw Table of contents:\n' + content + '\n Cleaned Table of contents:\n' + toc
     response = llm_completion(model=model, prompt=prompt)
     json_content = extract_json(response)
-    return json_content['completed']
+    return json_content.get('completed', 'no')
 
 def extract_toc_content(content, model=None):
     prompt = f"""
@@ -217,7 +216,7 @@ def detect_page_index(toc_content, model=None):
 
     response = llm_completion(model=model, prompt=prompt)
     json_content = extract_json(response)
-    return json_content['page_index_given_in_toc']
+    return json_content.get('page_index_given_in_toc', 'no')
 
 def toc_extractor(page_list, toc_page_list, model):
     def transform_dots_to_colon(text):
@@ -265,13 +264,237 @@ def toc_index_extractor(toc, content, model=None):
 
     prompt = toc_extractor_prompt + '\nTable of contents:\n' + str(toc) + '\nDocument pages:\n' + content
     response = llm_completion(model=model, prompt=prompt)
-    json_content = extract_json(response)    
+    json_content = extract_json(response)
+    if not isinstance(json_content, list):
+        return []
     return json_content
 
 
 
+def regex_toc_parser(toc_content):
+    """
+    Deterministic regex-based TOC parser for structured PDFs.
+
+    Handles all real-world TOC layout variants:
+
+    SEC 10-K / Annual Report styles:
+      A) Single line:        "Item 1A. Risk Factors .... 6"
+      B) Two lines:          "Item 1A. Risk Factors\\n6"
+      C) Three lines:        "Item 1A.\\nRisk Factors\\n6"  (Boeing)
+      D) Numbered (no Item): "1. Business .... 1" / "1.1 Risk Factors ... 6"
+      E) Chapter style:      "Chapter 1. Introduction ... 1"
+
+    Page number variants:
+      - Integer:             "6"
+      - Roman numeral:       "vi" / "VI"  (preface pages)
+      - F-page:              "F-1" / "F-12"  (financial statements in 10-Ks)
+      - Parenthesised:       "Business (6)"
+
+    Separator variants:
+      - Dot leaders:         "......" / ". . . ."
+      - Colon:               ":"
+      - Double+ space:       "  "
+      - Tab:                 "\\t"
+
+    Falls back gracefully (returns []) for:
+      - Scanned / image-only PDFs (no extractable text)
+      - Hyperlink-only TOCs with no page numbers
+      - Non-standard / exotic formats → LLM fallback kicks in
+    """
+    # Normalise non-breaking spaces / tabs → regular space
+    text = toc_content.replace('\xa0', ' ').replace('\t', ' ')
+    lines = [l.strip() for l in text.splitlines()]
+
+    # ---- compiled patterns ----
+    SKIP = re.compile(
+        r'^(table of contents|contents|index|page|for the fiscal|united states|'
+        r'securities and exchange|washington|form 10-k?|annual report|'
+        r'incorporated by reference|documents incorporated).*$',
+        re.IGNORECASE
+    )
+    PART_RE = re.compile(r'^(PART\s+[IVXivx]+)\s*(\d+)?\s*$', re.IGNORECASE)
+
+    # SEC Item: "Item 1." / "ITEM 1A." / "Item 9C."
+    ITEM_HDR = re.compile(r'^item\s+(\d+[A-Za-z]?)\.\s*(.*)$', re.IGNORECASE)
+
+    # Numbered section without "Item": "1." / "1.1" / "1.1.2"
+    NUM_HDR = re.compile(r'^(\d+(?:\.\d+)*\.?)\s+(.*)$')
+
+    # Chapter style: "Chapter 3. Title"
+    CHAP_HDR = re.compile(r'^chapter\s+(\d+)\.?\s+(.*)$', re.IGNORECASE)
+
+    # Page number variants (capture group 1 = raw page string)
+    # Matches: plain int, roman numerals, F-1..F-99, parenthesised int
+    PAGE_VAL = re.compile(
+        r'^(?:([ivxlcdmIVXLCDM]+)|(\d+)|(F-\d+)|\((\d+)\))$'
+    )
+
+    # Separator + page on same line: dots/colon/spaces then page value
+    # Also handles parenthesised page: "Business (6)"
+    INLINE_PAGE = re.compile(
+        r'^(.+?)(?:\.{2,}\s*|\.\s\.\s\.\s\.?\s*|:\s*|\s{2,}|\t|\s+(?=\())'
+        r'(?:([ivxlcdmIVXLCDM]+)|(\d+)|(F-\d+)|\((\d+)\))\s*$'
+    )
+
+    def roman_to_int(s):
+        val = {'i':1,'v':5,'x':10,'l':50,'c':100,'d':500,'m':1000}
+        s = s.lower()
+        result, prev = 0, 0
+        for ch in reversed(s):
+            curr = val.get(ch, 0)
+            result += curr if curr >= prev else -curr
+            prev = curr
+        return result
+
+    def parse_page(raw):
+        """Convert raw page string to int or None."""
+        if not raw:
+            return None
+        raw = raw.strip()
+        m = re.match(r'^\((\d+)\)$', raw)
+        if m:
+            return int(m.group(1))
+        if re.match(r'^F-(\d+)$', raw, re.IGNORECASE):
+            # Treat F-pages as large numbers so they sort after main content
+            return int(re.match(r'^F-(\d+)$', raw, re.IGNORECASE).group(1)) + 10000
+        if re.match(r'^\d+$', raw):
+            return int(raw)
+        if re.match(r'^[ivxlcdmIVXLCDM]+$', raw):
+            v = roman_to_int(raw)
+            return v if v > 0 else None
+        return None
+
+    def extract_inline_page(text):
+        """Try to extract (title, page_int) from a single line with inline page."""
+        m = INLINE_PAGE.match(text)
+        if not m:
+            return None, None
+        title = m.group(1).strip().rstrip('.')
+        # Groups 2-5 correspond to roman / int / F-page / paren-int
+        raw = next((g for g in m.groups()[1:] if g is not None), None)
+        return title, parse_page(raw)
+
+    def make_structure(item_id, structure_counter):
+        """Convert '1A' → '1.1', '9C' → '9.3', '7' → '7' etc."""
+        item_id = item_id.upper()
+        m = re.match(r'^(\d+)([A-Z]*)$', item_id)
+        if not m:
+            return item_id
+        num_part, letter = m.group(1), m.group(2)
+        if letter:
+            structure_counter.setdefault(num_part, 0)
+            structure_counter[num_part] += 1
+            return f"{num_part}.{structure_counter[num_part]}"
+        return num_part
+
+    # ---- state machine ----
+    entries = []
+    structure_counter = {}
+    pending_item_id = None
+    pending_title   = None
+    seen_parts      = set()
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        i += 1
+
+        if not line or SKIP.match(line):
+            continue
+
+        # ---- PART header ----
+        pm = PART_RE.match(line)
+        if pm:
+            part_name = pm.group(1).strip().upper()
+            # Hitting PART I again after we already recorded it = left the TOC
+            if 'PART I' in seen_parts and part_name == 'PART I':
+                break
+            seen_parts.add(part_name)
+            page = parse_page(pm.group(2)) if pm.group(2) else None
+            entries.append({'structure': None, 'title': pm.group(1).strip(), 'page': page})
+            pending_item_id = pending_title = None
+            continue
+
+        # ---- SEC Item header ----
+        im = ITEM_HDR.match(line)
+        if im:
+            item_id = im.group(1)
+            rest    = im.group(2).strip()
+            if rest:
+                title, page = extract_inline_page(rest)
+                if page is not None:
+                    entries.append({'structure': make_structure(item_id, structure_counter),
+                                    'title': title, 'page': page})
+                    pending_item_id = pending_title = None
+                else:
+                    pending_item_id, pending_title = item_id, rest
+            else:
+                pending_item_id, pending_title = item_id, None
+            continue
+
+        # ---- Chapter header ----
+        cm = CHAP_HDR.match(line)
+        if cm:
+            item_id = cm.group(1)
+            rest    = cm.group(2).strip()
+            title, page = extract_inline_page(rest)
+            if page is not None:
+                entries.append({'structure': item_id, 'title': title, 'page': page})
+                pending_item_id = pending_title = None
+            else:
+                pending_item_id, pending_title = item_id, rest or None
+            continue
+
+        # ---- Numbered section (no "Item") ----
+        nm = NUM_HDR.match(line)
+        if nm and not pending_item_id:
+            item_id = nm.group(1).rstrip('.')
+            rest    = nm.group(2).strip()
+            title, page = extract_inline_page(rest)
+            if page is not None:
+                entries.append({'structure': item_id, 'title': title, 'page': page})
+            elif rest:
+                pending_item_id, pending_title = item_id, rest
+            continue
+
+        # ---- Page-value-only line ----
+        pv = PAGE_VAL.match(line)
+        if pv:
+            raw = next((g for g in pv.groups() if g is not None), None)
+            page = parse_page(raw)
+            if page is not None and pending_item_id and pending_title:
+                entries.append({'structure': make_structure(pending_item_id, structure_counter),
+                                'title': pending_title, 'page': page})
+                pending_item_id = pending_title = None
+            continue
+
+        # ---- Continuation / plain title line ----
+        if pending_item_id:
+            title, page = extract_inline_page(line)
+            if page is not None:
+                entries.append({'structure': make_structure(pending_item_id, structure_counter),
+                                'title': title, 'page': page})
+                pending_item_id = pending_title = None
+            elif pending_title is None:
+                pending_title = line
+            else:
+                # Multi-line title: keep accumulating
+                pending_title += ' ' + line
+            continue
+
+    return entries
+
+
 def toc_transformer(toc_content, model=None):
     print('start toc_transformer')
+
+    # Try deterministic regex parser first — zero LLM calls, instant.
+    regex_result = regex_toc_parser(toc_content)
+    if len(regex_result) >= 3:
+        print(f'regex_toc_parser succeeded: {len(regex_result)} entries')
+        return convert_page_to_int(regex_result)
+    print('regex_toc_parser returned too few entries, falling back to LLM')
+
     init_prompt = """
     You are given a table of contents, You job is to transform the whole table of content into a JSON format included table_of_contents.
 
@@ -296,6 +519,8 @@ def toc_transformer(toc_content, model=None):
     if_complete = check_if_toc_transformation_is_complete(toc_content, last_complete, model)
     if if_complete == "yes" and finish_reason == "finished":
         last_complete = extract_json(last_complete)
+        if not isinstance(last_complete, dict) or 'table_of_contents' not in last_complete:
+            raise ValueError(f"toc_transformer: LLM returned malformed JSON, missing 'table_of_contents' key")
         cleaned_response=convert_page_to_int(last_complete['table_of_contents'])
         return cleaned_response
     
@@ -332,6 +557,8 @@ def toc_transformer(toc_content, model=None):
 
     last_complete = extract_json(last_complete)
 
+    if not isinstance(last_complete, dict) or 'table_of_contents' not in last_complete:
+        raise ValueError(f"toc_transformer: LLM returned malformed JSON after retries, missing 'table_of_contents' key")
     cleaned_response=convert_page_to_int(last_complete['table_of_contents'])
     return cleaned_response
     
@@ -376,6 +603,56 @@ def remove_page_number(data):
             remove_page_number(item)
     return data
 
+def calculate_offset_by_text_search(toc_with_page_number, page_list, logger=None):
+    """
+    Deterministically compute the physical-page offset by fuzzy-searching each
+    TOC section title in the actual page text.  No LLM needed.
+
+    Returns the most-common (title_page → physical_page) difference, or None if
+    fewer than 2 sections could be matched confidently.
+    """
+    # Only use sections that have a real TOC page number
+    candidates = [item for item in toc_with_page_number
+                  if isinstance(item.get('page'), int) and item['page'] is not None]
+    if not candidates:
+        return None
+
+    differences = []
+    for item in candidates:
+        title = item['title'].strip().lower()
+        toc_page_num = item['page']
+
+        # Strip "Item X." / "Item XA." prefixes Gemini sometimes adds to titles
+        title = re.sub(r'^item\s+\d+[a-z]?\.\s*', '', title, flags=re.IGNORECASE).strip()
+        if not title:
+            continue
+
+        # Search a window of pages around where we expect this section to start.
+        # Scan toc_page_num-1 .. toc_page_num+5 (physical, 0-based list index).
+        search_start = max(0, toc_page_num - 1)
+        search_end = min(len(page_list), toc_page_num + 6)
+        for phys_idx in range(search_start, search_end):
+            page_text = page_list[phys_idx][0].lower()
+            # Normalise whitespace for fuzzy match
+            title_norm = ' '.join(title.split())
+            page_norm = ' '.join(page_text.split())
+            if title_norm in page_norm:
+                differences.append((toc_page_num, phys_idx + 1))  # +1 → 1-based
+                break
+
+    if len(differences) < 2:
+        return None
+
+    offsets = [phys - toc for toc, phys in differences]
+    offset_counts = {}
+    for o in offsets:
+        offset_counts[o] = offset_counts.get(o, 0) + 1
+    best_offset = max(offset_counts.items(), key=lambda x: x[1])[0]
+    if logger:
+        logger.info(f'text_search offset: {best_offset} (matched {len(differences)}/{len(candidates)} sections)')
+    return best_offset
+
+
 def extract_matching_page_pairs(toc_page, toc_physical_index, start_page_index):
     pairs = []
     for phy_item in toc_physical_index:
@@ -414,6 +691,8 @@ def calculate_page_offset(pairs):
     return most_common
 
 def add_page_offset_to_toc_json(data, offset):
+    if offset is None:
+        offset = 0
     for i in range(len(data)):
         if data[i].get('page') is not None and isinstance(data[i]['page'], int):
             data[i]['physical_index'] = data[i]['page'] + offset
@@ -484,9 +763,10 @@ def add_page_number_to_toc(part, structure, model=None):
     prompt = fill_prompt_seq + f"\n\nCurrent Partial Document:\n{part}\n\nGiven Structure\n{json.dumps(structure, indent=2)}\n"
     current_json_raw = llm_completion(model=model, prompt=prompt)
     json_result = extract_json(current_json_raw)
-    
+    if not isinstance(json_result, list):
+        return structure
     for item in json_result:
-        if 'start' in item:
+        if isinstance(item, dict) and 'start' in item:
             del item['start']
     return json_result
 
@@ -533,10 +813,15 @@ def generate_toc_continue(toc_content, part, model=None):
 
     prompt = prompt + '\nGiven text\n:' + part + '\nPrevious tree structure\n:' + json.dumps(toc_content, indent=2)
     response, finish_reason = llm_completion(model=model, prompt=prompt, return_finish_reason=True)
-    if finish_reason == 'finished':
-        return extract_json(response)
-    else:
-        raise Exception(f'finish reason: {finish_reason}')
+    max_attempts = 5
+    attempt = 0
+    while finish_reason != 'finished' and attempt < max_attempts:
+        attempt += 1
+        chat_history = [{"role": "user", "content": prompt}, {"role": "assistant", "content": response}]
+        cont_prompt = "Continue the JSON array from where you left off. Output only the remaining JSON items."
+        new_response, finish_reason = llm_completion(model=model, prompt=cont_prompt, chat_history=chat_history, return_finish_reason=True)
+        response = response + new_response
+    return extract_json(response)
     
 ### add verify completeness
 def generate_toc_init(part, model=None):
@@ -567,11 +852,15 @@ def generate_toc_init(part, model=None):
 
     prompt = prompt + '\nGiven text\n:' + part
     response, finish_reason = llm_completion(model=model, prompt=prompt, return_finish_reason=True)
-
-    if finish_reason == 'finished':
-         return extract_json(response)
-    else:
-        raise Exception(f'finish reason: {finish_reason}')
+    max_attempts = 5
+    attempt = 0
+    while finish_reason != 'finished' and attempt < max_attempts:
+        attempt += 1
+        chat_history = [{"role": "user", "content": prompt}, {"role": "assistant", "content": response}]
+        cont_prompt = "Continue the JSON array from where you left off. Output only the remaining JSON items."
+        new_response, finish_reason = llm_completion(model=model, prompt=cont_prompt, chat_history=chat_history, return_finish_reason=True)
+        response = response + new_response
+    return extract_json(response)
 
 def process_no_toc(page_list, start_index=1, model=None, logger=None):
     page_contents=[]
@@ -580,13 +869,16 @@ def process_no_toc(page_list, start_index=1, model=None, logger=None):
         page_text = f"<physical_index_{page_index}>\n{page_list[page_index-start_index][0]}\n<physical_index_{page_index}>\n\n"
         page_contents.append(page_text)
         token_lengths.append(count_tokens(page_text, model))
-    group_texts = page_list_to_group_text(page_contents, token_lengths)
+    group_texts = page_list_to_group_text(page_contents, token_lengths, max_tokens=8000)
     logger.info(f'len(group_texts): {len(group_texts)}')
 
-    toc_with_page_number= generate_toc_init(group_texts[0], model)
+    toc_with_page_number = generate_toc_init(group_texts[0], model)
+    if not isinstance(toc_with_page_number, list):
+        toc_with_page_number = []
     for group_text in group_texts[1:]:
-        toc_with_page_number_additional = generate_toc_continue(toc_with_page_number, group_text, model)    
-        toc_with_page_number.extend(toc_with_page_number_additional)
+        toc_with_page_number_additional = generate_toc_continue(toc_with_page_number, group_text, model)
+        if isinstance(toc_with_page_number_additional, list):
+            toc_with_page_number.extend(toc_with_page_number_additional)
     logger.info(f'generate_toc: {toc_with_page_number}')
 
     toc_with_page_number = convert_physical_index_to_int(toc_with_page_number)
@@ -604,7 +896,7 @@ def process_toc_no_page_numbers(toc_content, toc_page_list, page_list,  start_in
         page_contents.append(page_text)
         token_lengths.append(count_tokens(page_text, model))
     
-    group_texts = page_list_to_group_text(page_contents, token_lengths)
+    group_texts = page_list_to_group_text(page_contents, token_lengths, max_tokens=8000)
     logger.info(f'len(group_texts): {len(group_texts)}')
 
     toc_with_page_number=copy.deepcopy(toc_content)
@@ -625,22 +917,30 @@ def process_toc_with_page_numbers(toc_content, toc_page_list, page_list, toc_che
 
     toc_no_page_number = remove_page_number(copy.deepcopy(toc_with_page_number))
     
-    start_page_index = toc_page_list[-1] + 1
+    # Start scan from first TOC page so sections that begin within TOC pages are found.
+    # (Some 10-Ks embed Part I content on the same pages as the index table.)
+    start_page_index = toc_page_list[0]
     main_content = ""
     for page_index in range(start_page_index, min(start_page_index + toc_check_page_num, len(page_list))):
         main_content += f"<physical_index_{page_index+1}>\n{page_list[page_index][0]}\n<physical_index_{page_index+1}>\n\n"
 
-    toc_with_physical_index = toc_index_extractor(toc_no_page_number, main_content, model)
-    logger.info(f'toc_with_physical_index: {toc_with_physical_index}')
+    # Try deterministic text-search offset first — fast, no LLM call needed.
+    offset = calculate_offset_by_text_search(toc_with_page_number, page_list, logger=logger)
+    logger.info(f'text_search offset: {offset}')
 
-    toc_with_physical_index = convert_physical_index_to_int(toc_with_physical_index)
-    logger.info(f'toc_with_physical_index: {toc_with_physical_index}')
+    if offset is None:
+        # Fallback: ask the LLM to match titles to physical pages.
+        toc_with_physical_index = toc_index_extractor(toc_no_page_number, main_content, model)
+        logger.info(f'toc_with_physical_index: {toc_with_physical_index}')
 
-    matching_pairs = extract_matching_page_pairs(toc_with_page_number, toc_with_physical_index, start_page_index)
-    logger.info(f'matching_pairs: {matching_pairs}')
+        toc_with_physical_index = convert_physical_index_to_int(toc_with_physical_index)
+        logger.info(f'toc_with_physical_index: {toc_with_physical_index}')
 
-    offset = calculate_page_offset(matching_pairs)
-    logger.info(f'offset: {offset}')
+        matching_pairs = extract_matching_page_pairs(toc_with_page_number, toc_with_physical_index, start_page_index)
+        logger.info(f'matching_pairs: {matching_pairs}')
+
+        offset = calculate_page_offset(matching_pairs)
+        logger.info(f'llm offset: {offset}')
 
     toc_with_page_number = add_page_offset_to_toc_json(toc_with_page_number, offset)
     logger.info(f'toc_with_page_number: {toc_with_page_number}')
@@ -752,7 +1052,9 @@ async def single_toc_item_index_fixer(section_title, content, model=None):
 
     prompt = toc_extractor_prompt + '\nSection Title:\n' + str(section_title) + '\nDocument pages:\n' + content
     response = await llm_acompletion(model=model, prompt=prompt)
-    json_content = extract_json(response)    
+    json_content = extract_json(response)
+    if not isinstance(json_content, dict) or 'physical_index' not in json_content:
+        return None
     return convert_physical_index_to_int(json_content['physical_index'])
 
 
@@ -907,7 +1209,7 @@ async def verify_toc(page_list, list_result, start_index=1, N=None, model=None):
             break
     
     # Early return if we don't have valid physical indices
-    if last_physical_index is None or last_physical_index < len(page_list)/2:
+    if last_physical_index is None or last_physical_index < 5:
         return 0, []
     
     # Determine which items to check
@@ -1074,7 +1376,7 @@ def page_index_main(doc, opt=None):
         raise ValueError("Unsupported input type. Expected a PDF file path or BytesIO object.")
 
     print('Parsing PDF...')
-    page_list = get_page_tokens(doc, model=opt.model)
+    page_list = get_page_tokens(doc, model=opt.model, pdf_parser="PyMuPDF")
 
     logger.info({'total_page_number': len(page_list)})
     logger.info({'total_token': sum([page[1] for page in page_list])})

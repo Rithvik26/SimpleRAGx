@@ -1,6 +1,7 @@
 import litellm
 import logging
 import os
+import re
 import textwrap
 from datetime import datetime
 import time
@@ -9,6 +10,7 @@ import PyPDF2
 import copy
 import asyncio
 import pymupdf
+import pdfplumber
 from io import BytesIO
 from dotenv import load_dotenv
 load_dotenv()
@@ -36,12 +38,18 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
     messages = list(chat_history) + [{"role": "user", "content": prompt}] if chat_history else [{"role": "user", "content": prompt}]
     for i in range(max_retries):
         try:
+            if i > 0:
+                time.sleep(4)  # back-off between retries — respects free tier 15 RPM
             response = litellm.completion(
                 model=model,
                 messages=messages,
                 temperature=0,
+                max_tokens=16384,
+                thinking={"type": "disabled"},
             )
             content = response.choices[0].message.content
+            if not content:
+                raise ValueError("LLM returned empty/None content")
             if return_finish_reason:
                 finish_reason = "max_output_reached" if response.choices[0].finish_reason == "length" else "finished"
                 return content, finish_reason
@@ -50,7 +58,7 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
             print('************* Retrying *************')
             logging.error(f"Error: {e}")
             if i < max_retries - 1:
-                time.sleep(1)
+                time.sleep(4)  # 4s between retries — respects free tier 15 RPM limit
             else:
                 logging.error('Max retries reached for prompt: ' + prompt)
                 if return_finish_reason:
@@ -70,6 +78,7 @@ async def llm_acompletion(model, prompt):
                 model=model,
                 messages=messages,
                 temperature=0,
+                thinking={"type": "disabled"},
             )
             return response.choices[0].message.content
         except Exception as e:
@@ -384,27 +393,56 @@ def add_preface_if_needed(data):
 
 
 
+def _clean_page_text(text: str) -> str:
+    """Strip navigation headers that PDF publishers embed on every page (e.g. Boeing 10-K 'Table of Contents' link)."""
+    return re.sub(r'(?i)^table of contents\s*[\r\n]+', '', text.lstrip())
+
+
+def _get_tables_text(plumber_page) -> str:
+    """Extract tables from a pdfplumber page and return as pipe-delimited text."""
+    try:
+        tables = plumber_page.extract_tables()
+        if not tables:
+            return ""
+        parts = []
+        for table in tables:
+            rows = [" | ".join(str(c or "").strip() for c in row) for row in table]
+            parts.append("\n".join(rows))
+        return "\n\n[TABLE]\n" + "\n[TABLE]\n".join(parts)
+    except Exception:
+        return ""
+
+
 def get_page_tokens(pdf_path, model=None, pdf_parser="PyPDF2"):
     if pdf_parser == "PyPDF2":
         pdf_reader = PyPDF2.PdfReader(pdf_path)
         page_list = []
         for page_num in range(len(pdf_reader.pages)):
             page = pdf_reader.pages[page_num]
-            page_text = page.extract_text()
+            page_text = _clean_page_text(page.extract_text() or "")
             token_length = litellm.token_counter(model=model, text=page_text)
             page_list.append((page_text, token_length))
         return page_list
     elif pdf_parser == "PyMuPDF":
         if isinstance(pdf_path, BytesIO):
-            pdf_stream = pdf_path
-            doc = pymupdf.open(stream=pdf_stream, filetype="pdf")
+            doc = pymupdf.open(stream=pdf_path, filetype="pdf")
+            pdf_path.seek(0)
+            plumber_pdf = pdfplumber.open(pdf_path)
         elif isinstance(pdf_path, str) and os.path.isfile(pdf_path) and pdf_path.lower().endswith(".pdf"):
             doc = pymupdf.open(pdf_path)
+            plumber_pdf = pdfplumber.open(pdf_path)
+        else:
+            raise ValueError(f"Invalid pdf_path: {pdf_path}")
         page_list = []
-        for page in doc:
-            page_text = page.get_text()
-            token_length = litellm.token_counter(model=model, text=page_text)
-            page_list.append((page_text, token_length))
+        try:
+            for i, page in enumerate(doc):
+                page_text = _clean_page_text(page.get_text())
+                table_text = _get_tables_text(plumber_pdf.pages[i])
+                combined = page_text + table_text
+                token_length = litellm.token_counter(model=model, text=combined)
+                page_list.append((combined, token_length))
+        finally:
+            plumber_pdf.close()
         return page_list
     else:
         raise ValueError(f"Unsupported PDF parser: {pdf_parser}")
