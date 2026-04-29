@@ -364,7 +364,82 @@ A fresh Claude Code session should be able to pick this up by:
 
 ---
 
-## 8. Sources
+## 8. Production Infrastructure Plan (as of 2026-04-30)
+
+### What we fixed (shipped)
+
+| Fix | File | Impact |
+|---|---|---|
+| Batch graph embedding | `graph_rag_service.py` | 10-18x faster (297 elements: 2:48 → 9s) |
+| Doc-level skip cache | `simple_rag.py` | Re-index same doc = instant, $0 LLM cost |
+| Parallel doc indexing (eval) | `eval/multihop_rag_real.py` | 4.5x faster (25 docs: 14 min → 3 min) |
+
+### Current bottlenecks (ranked)
+
+1. **Graph extraction** — 1 LLM call per chunk, dominant cost. Only fix is faster model or parallel docs.
+2. **GLiNER cold start** — ~35s model load every fresh Python process. Fixed when server stays warm (Render deploy).
+3. **Sequential docs in server** — upload page does one doc at a time by design (single-file upload). Fine for now.
+
+### Infra tier plan
+
+**Tier 0 — Dev (now, $0/month)**
+- Qdrant Cloud free (1GB RAM, 4GB disk, ~500k vectors)
+- Neo4j AuraDB free (200k nodes)
+- `ThreadPoolExecutor(4)` for parallel indexing in eval harness
+- GLiNER on local CPU / Render web dyno
+
+**Tier 1 — First real users (~$80-130/month)**
+- Qdrant Cloud Standard — $50-80/mo, 4GB dedicated, 99.9% SLA
+- Neo4j AuraDB Professional — $65/mo, no node limit
+- Render web service (existing) stays free
+- Modal Labs for GLiNER — $30/mo free credits, GPU warm serving
+
+**Tier 2 — Multiple simultaneous users (~$300-500/month)**
+- Celery + Upstash Redis — async job queue, retries, job history
+- Upstash Redis free tier: 500k commands/month, 256MB (sufficient for dev)
+- Render background worker — $7/mo for dedicated Celery worker
+- Qdrant 8GB cluster — $150-200/mo
+
+**Tier 3 — Production scale ($1000+/month)**
+- Ray or Celery + RabbitMQ for distributed workers
+- Qdrant Hybrid Cloud (your own infra, Qdrant manages ops)
+- Neo4j self-hosted on EC2
+- GPU workers for GLiNER (NVIDIA L4: 8,771 pages/hour)
+
+### Technology decisions
+
+**Celery vs Ray:**
+- **Celery** — winner for SimpleRAG. Background job queue for Flask web app. pip install, works with existing code.
+- **Ray** — for serving your own trained ML models at scale (10k concurrent users). Overkill here.
+- **AWS Lambda** — 15-min hard limit kills it for indexing (Boeing 10-K = 20 min). Good for query endpoint only.
+- **AWS SQS** — AWS-native Celery equivalent. More complexity, same result. Use when already on AWS.
+
+**Free options available right now:**
+- Upstash Redis: 500k commands/month free, no credit card
+- Modal Labs: $30/month free compute credits for GLiNER GPU serving
+- Render background workers: NOT free ($7/mo minimum)
+- Fly.io / Railway / Koyeb: all killed free worker tiers in 2025-2026
+
+### Cost benchmarks (observed Apr 2026)
+
+| Action | Cost |
+|---|---|
+| Index 25 news articles (graph mode) | ~$0.05 |
+| Index full 609-doc MultiHop-RAG corpus | ~$0.80-1.50 (one-time) |
+| Re-index same corpus (with skip cache) | ~$0.00 |
+| Single query + judge | ~$0.005 |
+| n=50 eval run | ~$0.10 |
+
+### Next infra steps (priority order)
+
+1. **Modal for GLiNER** — free, removes 35s cold start, GPU inference
+2. **Upstash Redis + Celery** — when first concurrent users arrive
+3. **Render background worker ($7/mo)** — proper Celery worker separation
+4. **Qdrant Standard** — when free tier hits limits (~500k vectors)
+
+---
+
+## 9. Sources
 
 - [Karpathy, LLM Wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)
 - [VentureBeat — Karpathy LLM Knowledge Base bypasses RAG](https://venturebeat.com/data/karpathy-shares-llm-knowledge-base-architecture-that-bypasses-rag-with-an)
