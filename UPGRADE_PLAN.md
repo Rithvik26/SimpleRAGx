@@ -433,9 +433,50 @@ A fresh Claude Code session should be able to pick this up by:
 ### Next infra steps (priority order)
 
 1. **Modal for GLiNER** — free, removes 35s cold start, GPU inference
-2. **Upstash Redis + Celery** — when first concurrent users arrive
+2. **Upstash Redis Streams + Celery** — when first concurrent users arrive
 3. **Render background worker ($7/mo)** — proper Celery worker separation
 4. **Qdrant Standard** — when free tier hits limits (~500k vectors)
+
+---
+
+### Message queue decision — Redis Streams vs RabbitMQ vs AWS SQS
+
+**Winner: Redis Streams (Upstash free tier)**
+
+| | Redis Streams | RabbitMQ | AWS SQS |
+|---|---|---|---|
+| **Delivery** | At-least-once (AOF) | At-least-once ✅ | At-least-once ✅ |
+| **Persistence** | AOF/RDB config needed | Durable queues built-in | Always persistent ✅ |
+| **Message replay** | ✅ Yes (log-based) | ❌ No | ❌ No |
+| **Fan-out** | ✅ Consumer groups | ✅ Exchanges | ❌ Needs SNS |
+| **Max message size** | 512MB | 128MB | **256KB ❌** |
+| **Dead letter queue** | Manual | Built-in ✅ | Built-in ✅ |
+| **Free tier** | Upstash 500k/mo | CloudAMQP 1M/mo | 1M requests/mo forever |
+| **Vendor lock-in** | Redis protocol (open) | AMQP (open) | AWS only ❌ |
+| **Ops burden** | Low | Low | Zero |
+
+**Why Redis Streams wins for SimpleRAG:**
+- Already planned Upstash Redis — no extra service
+- Message replay = re-process failed indexing jobs without re-upload
+- 512MB message size — no issues passing large doc metadata
+- Celery supports it natively via kombu
+- Free on Upstash (500k commands/month)
+
+**Why NOT Redis Pub/Sub:**
+- Fire and forget — if worker is offline, message gone forever
+- No persistence, no acknowledgement, no retry
+- Built for live notifications (chat, dashboards), not background jobs
+
+**Why NOT Kafka:**
+- Built for 10k+ events/second, event streaming, financial transactions
+- Minimum 6GB RAM to self-host (JVM + ZooKeeper)
+- No meaningful free tier (Confluent free expires after 30 days)
+- 18-wheel truck for moving a pizza box
+
+**When to switch:**
+- → RabbitMQ: need complex routing (different queue per doc type) or proper AMQP dead letter queues
+- → AWS SQS: already deep in AWS (Lambda, EC2, IAM all wired), messages stay under 256KB
+- → Kafka: 10k+ indexing jobs/day, need event replay at scale, multiple microservices consuming same stream
 
 ---
 
