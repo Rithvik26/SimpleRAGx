@@ -26,6 +26,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from typing import List, Dict, Any
 
 import litellm
@@ -70,8 +71,8 @@ class QueryPlanner:
 
         strategy = "decomposed" if len(sub_queries) > 1 else ("hyde" if any(hyde_docs) else "simple")
         logger.info(
-            f"QueryPlanner [{strategy}]: {len(sub_queries)} sub-queries, "
-            f"{sum(1 for d in hyde_docs if d)} hyde docs"
+            "QueryPlanner [%s]: %d sub-queries, %d hyde docs",
+            strategy, len(sub_queries), sum(1 for d in hyde_docs if d),
         )
         return {"strategy": strategy, "sub_queries": sub_queries, "hyde_docs": hyde_docs}
 
@@ -80,22 +81,25 @@ class QueryPlanner:
         prompt = (
             "Break this complex question into 2-4 simpler sub-questions that together "
             "cover everything needed to answer it. Each sub-question should be independently answerable.\n"
-            "Return ONLY a JSON array of question strings. No prose.\n\n"
-            f"Question: {query}\n\nSub-questions (JSON array):"
+            "Return ONLY a JSON array of question strings, e.g. [\"Q1\",\"Q2\"]. No prose, no markdown.\n\n"
+            f"Question: {query}\n\nSub-questions (JSON array only):"
         )
         try:
             raw = self._call(prompt, max_tokens=400)
-            cleaned = _strip_fence(raw)
-            import re as _re
-            m = _re.search(r'\[.*?\]', cleaned, _re.DOTALL)
-            cleaned = _re.sub(r'\s+', ' ', m.group(0)) if m else cleaned
-            subs = json.loads(cleaned)
-            if isinstance(subs, list) and subs:
-                # Original query always first so it's always retrieved against
+            subs = _extract_string_array(raw)
+            if subs is None:
+                # One retry with an even stricter prompt
+                retry = (
+                    "Output ONLY a valid JSON array of strings. Example: [\"Q1\",\"Q2\"].\n\n"
+                    f"Break into 2-4 sub-questions: {query[:300]}"
+                )
+                raw2 = self._call(retry, max_tokens=300)
+                subs = _extract_string_array(raw2)
+            if subs:
                 unique = [query] + [s for s in subs if isinstance(s, str) and s.strip() != query]
                 return unique[:5]
         except Exception as e:
-            logger.warning(f"Query decomposition failed: {e}")
+            logger.warning("Query decomposition failed: %s", e)
         return [query]
 
     def _generate_hyde_docs(self, queries: List[str]) -> List[str]:
@@ -117,7 +121,7 @@ class QueryPlanner:
                 doc = self._call(prompt, max_tokens=180)
                 hyde_docs.append(doc.strip())
             except Exception as e:
-                logger.warning(f"HyDE generation failed: {e}")
+                logger.warning("HyDE generation failed: %s", e)
                 hyde_docs.append("")
         return hyde_docs
 
@@ -129,7 +133,43 @@ class QueryPlanner:
             temperature=0.1,
             max_tokens=max_tokens,
         )
-        return resp.choices[0].message.content.strip()
+        return (resp.choices[0].message.content or "").strip()
+
+
+# ── JSON extraction helpers ───────────────────────────────────────────────────
+
+def _strip_fence(text: str) -> str:
+    """Remove the outermost markdown code fence if present."""
+    text = text.strip()
+    if "```" in text:
+        parts = text.split("```")
+        inner = parts[1] if len(parts) > 1 else text
+        return inner.lstrip("json").strip()
+    return text
+
+
+def _extract_string_array(text: str):
+    """
+    Extract the first JSON string array from text, tolerating:
+    - markdown code fences
+    - surrounding prose
+    - multiline whitespace
+
+    Returns list[str] or None.
+    """
+    text = _strip_fence(text)
+    # Find the outermost [...] span
+    m = re.search(r'\[.*?\]', text, re.DOTALL)
+    if not m:
+        return None
+    candidate = re.sub(r'\s+', ' ', m.group(0)).strip()
+    try:
+        parsed = json.loads(candidate)
+        if isinstance(parsed, list) and parsed:
+            return [str(x) for x in parsed if x]
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return None
 
 
 # ── RRF helpers ───────────────────────────────────────────────────────────────
@@ -167,11 +207,3 @@ def _is_complex(query: str) -> bool:
 
 def _simple_plan(query: str) -> Dict[str, Any]:
     return {"strategy": "simple", "sub_queries": [query], "hyde_docs": []}
-
-
-def _strip_fence(text: str) -> str:
-    if "```" in text:
-        parts = text.split("```")
-        inner = parts[1] if len(parts) > 1 else text
-        return inner.lstrip("json").strip()
-    return text

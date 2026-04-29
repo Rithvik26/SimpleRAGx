@@ -16,7 +16,7 @@ from embedding_service import EmbeddingService
 from vector_db_service import VectorDBService
 from graph_rag_service import GraphRAGService
 from document_processor import DocumentProcessor
-from llm_service import LLMService, _clean_source_name
+from llm_service import LLMService, _clean_source_name, GEMINI_MODEL
 from extensions import ProgressTracker
 from domain_config import get_domain
 from metadata_extractor import MetadataExtractor
@@ -340,14 +340,14 @@ class EnhancedSimpleRAG:
         
         return validation
     
-    def index_document(self, file_path: str, progress_tracker: Optional[ProgressTracker] = None) -> Dict[str, Any]:
+    def index_document(self, file_path: str, progress_tracker: Optional[ProgressTracker] = None,
+                       extra_metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Index a document with OPTIMIZED parallel batch embedding (5x faster).
-        
-        Speed improvements:
-        - Parallel embedding generation (5x faster for large documents)
-        - Batch processing for vector DB insertions
-        - Progress tracking for better UX
+
+        extra_metadata — optional dict merged into every chunk's metadata after chunking.
+        Useful for injecting corpus-level tags (title, source, benchmark_corpus, etc.)
+        without requiring the document processor to understand those fields.
         """
         logger.info(f"Starting document indexing for: {file_path}")
         start_time = time.time()
@@ -359,12 +359,30 @@ class EnhancedSimpleRAG:
         try:
             # 1. Validate file
             if progress_tracker:
-                progress_tracker.update(5, 100, status="validating", 
+                progress_tracker.update(5, 100, status="validating",
                                     message="Validating file")
-            
+
             validation_result = self.validate_file(file_path)
             if not validation_result["valid"]:
                 raise ValueError(f"Invalid file: {validation_result.get('error', 'Unknown error')}")
+
+            # 1b. Skip if already indexed (content hash check)
+            import hashlib as _hl
+            file_hash = _hl.sha256(Path(file_path).read_bytes()).hexdigest()[:16]
+            if self.vector_db_service:
+                try:
+                    hits, _ = self.vector_db_service.client.scroll(
+                        collection_name=self.config["collection_name"],
+                        scroll_filter={"must": [{"key": "metadata.doc_hash", "match": {"value": file_hash}}]},
+                        limit=1,
+                        with_payload=False,
+                        with_vectors=False,
+                    )
+                    if hits:
+                        logger.info(f"Doc already indexed (hash={file_hash}), skipping: {file_path}")
+                        return {"success": True, "chunks_indexed": 0, "entities_extracted": 0, "skipped": True}
+                except Exception:
+                    pass  # collection may not exist yet — proceed normally
             
             # 2. Process document into chunks
             if progress_tracker:
@@ -377,6 +395,13 @@ class EnhancedSimpleRAG:
                 raise ValueError("No chunks generated from document")
 
             logger.info(f"Generated {len(chunks)} chunks from document")
+
+            # 2a. Merge caller-supplied extra_metadata into every chunk
+            for chunk in chunks:
+                chunk.setdefault("metadata", {})["doc_hash"] = file_hash
+            if extra_metadata:
+                for chunk in chunks:
+                    chunk["metadata"].update(extra_metadata)
 
             # 2b. Domain metadata extraction — one LLM call per document, merged into all chunks
             if self.metadata_extractor and chunks:
@@ -520,10 +545,17 @@ class EnhancedSimpleRAG:
                                                 message="Storing graph in Neo4j")
                         import os as _os
                         file_name = _os.path.basename(file_path)
+                        # Pull benchmark_corpus and document metadata from the first chunk
+                        _first_meta = chunks[0].get("metadata", {}) if chunks else {}
+                        _bm_corpus  = _first_meta.get("benchmark_corpus", "")
+                        _doc_meta   = {k: _first_meta.get(k, "") for k in
+                                       ("title", "source", "category", "published_at", "url")}
                         neo4j_stats = self.neo4j_service.store_entities_and_relationships(
                             graph_result["entities"],
                             graph_result["relationships"],
                             document_name=file_name,
+                            benchmark_corpus=_bm_corpus,
+                            doc_metadata=_doc_meta,
                         )
                         self.neo4j_service.create_indexes()
                         logger.info(
@@ -918,10 +950,16 @@ class EnhancedSimpleRAG:
                 collection_name=self.config["collection_name"]
             )
 
-            # Search graph elements
+            # Search graph elements (Neo4j traversal when available)
+            if not self.neo4j_service:
+                logger.warning(
+                    "graph mode: Neo4j not configured — topology traversal disabled. "
+                    "Configure NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD for full graph mode."
+                )
             graph_contexts = self.graph_rag_service.search_graph(
                 question,
-                top_k=top_k // 2
+                top_k=top_k // 2,
+                neo4j_service=self.neo4j_service,
             )
 
             # Rerank doc_contexts before combining with graph contexts
@@ -1301,12 +1339,13 @@ Answer:"""
                 collection_name=self.config["collection_name"]
             )
             
-            # Search graph elements
+            # Search graph elements (Neo4j traversal when available)
             graph_contexts = self.graph_rag_service.search_graph(
                 question,
-                top_k=self.config["top_k"] // 3
+                top_k=self.config["top_k"] // 3,
+                neo4j_service=self.neo4j_service,
             )
-            
+
             # Step 2: Query Neo4j if available
             neo4j_contexts = []
             if self.neo4j_service:
@@ -1517,6 +1556,254 @@ Answer:"""
                                     message="PageIndex agentic query starting…")
 
         return self.pageindex_service.query(question, doc_id, progress_tracker)
+
+    # ── query_debug: structured query result for eval/benchmarks ─────────────
+
+    def query_debug(self, question: str, filters: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        Like query() but returns a structured dict exposing retrieved contexts.
+        Non-breaking: the existing query() API is unchanged.
+
+        Returns:
+            answer            str   — generated answer
+            mode              str   — rag_mode used
+            model             str   — LLM model string
+            collection_names  list  — Qdrant collection(s) searched
+            contexts_doc      list  — retrieved document chunk dicts {text, metadata, score}
+            contexts_graph    list  — retrieved graph element dicts (graph/hybrid modes)
+            entities_used     list  — graph contexts where type=="entity"
+            relationships_used list — graph contexts where type=="relationship"
+            cypher_query      str   — Cypher string (neo4j/hybrid modes only)
+            cypher_rows       list  — Neo4j result rows (neo4j/hybrid modes only)
+            latency_ms        float — total wall-clock ms
+        """
+        import time as _time
+        if not self.is_ready():
+            return {
+                "answer": "SimpleRAG is not ready.",
+                "mode": self.rag_mode, "model": GEMINI_MODEL,
+                "collection_names": [], "contexts_doc": [], "contexts_graph": [],
+                "entities_used": [], "relationships_used": [],
+                "cypher_query": "", "cypher_rows": [], "latency_ms": 0,
+            }
+
+        t0 = _time.time()
+        result: Dict[str, Any] = {
+            "mode": self.rag_mode,
+            "model": GEMINI_MODEL,
+            "collection_names": [self.config.get("collection_name", "documents")],
+            "contexts_doc": [],
+            "contexts_graph": [],
+            "entities_used": [],
+            "relationships_used": [],
+            "cypher_query": "",
+            "cypher_rows": [],
+            "answer": "",
+        }
+
+        try:
+            if self.rag_mode == "normal":
+                answer, doc_ctxs = self._query_normal_debug(question, filters=filters)
+                result["answer"] = answer
+                result["contexts_doc"] = doc_ctxs
+
+            elif self.rag_mode == "graph" and self.is_graph_ready():
+                answer, doc_ctxs, graph_ctxs = self._query_graph_debug(question)
+                result["answer"] = answer
+                result["contexts_doc"] = doc_ctxs
+                result["contexts_graph"] = graph_ctxs
+                result["entities_used"] = [c for c in graph_ctxs if c.get("metadata", {}).get("type") == "entity"]
+                result["relationships_used"] = [c for c in graph_ctxs if c.get("metadata", {}).get("type") == "relationship"]
+                result["collection_names"] = [
+                    self.config.get("collection_name", "documents"),
+                    self.config.get("graph_collection_name", "graph_entities"),
+                ]
+
+            elif self.rag_mode == "neo4j" and self.is_neo4j_ready():
+                # Pure Neo4j: generate Cypher → execute → LLM answer. No Qdrant/vector retrieval.
+                # Mirrors production query_neo4j() exactly.
+                answer, cypher_q, cypher_rows = self._query_neo4j_debug(question)
+                result["answer"] = answer
+                result["cypher_query"] = cypher_q
+                result["cypher_rows"] = cypher_rows
+                # Production neo4j mode has no doc or graph vector contexts.
+
+            elif self.rag_mode == "hybrid_neo4j" and self.is_neo4j_ready():
+                answer, doc_ctxs, graph_ctxs, cypher_q, cypher_rows = self._query_hybrid_neo4j_debug(question)
+                result["answer"] = answer
+                result["contexts_doc"] = doc_ctxs
+                result["contexts_graph"] = graph_ctxs
+                result["cypher_query"] = cypher_q
+                result["cypher_rows"] = cypher_rows
+                result["entities_used"] = [c for c in graph_ctxs if c.get("metadata", {}).get("type") == "entity"]
+                result["relationships_used"] = [c for c in graph_ctxs if c.get("metadata", {}).get("type") == "relationship"]
+
+            else:
+                # pageindex or fallback
+                result["answer"] = self.query(question)
+
+        except Exception as e:
+            logger.error(f"query_debug error: {e}")
+            result["answer"] = f"Error: {e}"
+
+        result["latency_ms"] = round((_time.time() - t0) * 1000, 1)
+        return result
+
+    def _query_normal_debug(self, question: str, filters: Dict[str, Any] = None):
+        """Normal RAG retrieval — returns (answer, doc_contexts)."""
+        top_k = self.config["top_k"]
+        retrieval_k = top_k * 4 if self.reranker else top_k
+
+        if self.query_planner:
+            plan = self.query_planner.plan(question)
+        else:
+            plan = {"strategy": "simple", "sub_queries": [question], "hyde_docs": []}
+
+        result_lists = []
+        for i, q in enumerate(plan["sub_queries"]):
+            hyde_docs = plan.get("hyde_docs", [])
+            hyde = hyde_docs[i] if i < len(hyde_docs) and hyde_docs[i] else None
+            emb = self.embedding_service.get_embedding(hyde if hyde else q)
+            result_lists.append(self.vector_db_service.search_similar(
+                emb, top_k=retrieval_k,
+                collection_name=self.config["collection_name"],
+                filters=filters,
+            ))
+
+        contexts = rrf_merge(result_lists) if len(result_lists) > 1 else (result_lists[0] if result_lists else [])
+
+        if not contexts:
+            return "No relevant information found.", []
+
+        if self.reranker and len(contexts) > top_k:
+            contexts = self.reranker.rerank(question, contexts, top_k)
+        else:
+            contexts = contexts[:top_k]
+
+        if self.llm_service and self.llm_service.is_available():
+            answer = self.llm_service.generate_answer(question, contexts, rag_mode="normal")
+        else:
+            answer = self._format_raw_results(contexts)
+
+        return answer, contexts
+
+    def _query_graph_debug(self, question: str):
+        """Graph RAG retrieval — returns (answer, doc_contexts, graph_contexts)."""
+        query_embedding = self.embedding_service.get_embedding(question)
+        top_k = self.config["top_k"]
+        retrieval_k = top_k * 2 if self.reranker else top_k // 2
+
+        doc_contexts = self.vector_db_service.search_similar(
+            query_embedding, top_k=retrieval_k,
+            collection_name=self.config["collection_name"]
+        )
+        graph_contexts = self.graph_rag_service.search_graph(
+            question, top_k=top_k // 2, neo4j_service=self.neo4j_service
+        )
+
+        if self.reranker and len(doc_contexts) > top_k // 2:
+            doc_contexts = self.reranker.rerank(question, doc_contexts, top_k // 2)
+
+        all_contexts = doc_contexts + graph_contexts
+        if not all_contexts:
+            return "No relevant information found.", [], []
+
+        graph_context = {
+            "entities": [c for c in graph_contexts if c["metadata"].get("type") == "entity"],
+            "relationships": [c for c in graph_contexts if c["metadata"].get("type") == "relationship"],
+        }
+        if self.llm_service and self.llm_service.is_available():
+            answer = self.llm_service.generate_answer(
+                question, all_contexts, graph_context=graph_context, rag_mode="graph"
+            )
+        else:
+            answer = self._format_graph_raw_results(doc_contexts, graph_contexts)
+
+        return answer, doc_contexts, graph_contexts
+
+    def _query_hybrid_neo4j_debug(self, question: str):
+        """Hybrid Neo4j retrieval — returns (answer, doc_ctxs, graph_ctxs, cypher_q, cypher_rows)."""
+        query_embedding = self.embedding_service.get_embedding(question)
+        top_k = self.config["top_k"]
+
+        doc_contexts = self.vector_db_service.search_similar(
+            query_embedding, top_k=top_k // 3,
+            collection_name=self.config["collection_name"]
+        )
+        graph_contexts = (
+            self.graph_rag_service.search_graph(
+                question, top_k=top_k // 3, neo4j_service=self.neo4j_service
+            )
+            if self.is_graph_ready() else []
+        )
+
+        cypher_query = ""
+        cypher_rows = []
+        neo4j_contexts = []
+        if self.neo4j_service:
+            cypher_query, err = self.neo4j_service.generate_cypher_from_question(question, self.llm_service)
+            if not err and cypher_query:
+                cypher_rows, exec_err = self.neo4j_service.execute_cypher_query(cypher_query)
+                if not exec_err:
+                    for i, row in enumerate(cypher_rows[:top_k // 3]):
+                        neo4j_contexts.append({
+                            "text": self._format_neo4j_result_as_text(row),
+                            "metadata": {"type": "neo4j_result", "source": "Neo4j", "cypher_query": cypher_query},
+                            "score": None,
+                        })
+
+        all_contexts = doc_contexts + graph_contexts + neo4j_contexts
+        if not all_contexts:
+            return "No relevant information found.", [], [], cypher_query, cypher_rows
+
+        graph_context = {
+            "entities": [c for c in graph_contexts if c["metadata"].get("type") == "entity"],
+            "relationships": [c for c in graph_contexts if c["metadata"].get("type") == "relationship"],
+            "neo4j_results": neo4j_contexts,
+        }
+        if self.llm_service and self.llm_service.is_available():
+            answer = self.llm_service.generate_hybrid_neo4j_answer(question, all_contexts, graph_context=graph_context)
+        else:
+            answer = self._format_hybrid_raw_results(doc_contexts, graph_contexts, neo4j_contexts)
+
+        return answer, doc_contexts, graph_contexts, cypher_query, cypher_rows
+
+    def _query_neo4j_debug(self, question: str):
+        """Pure Neo4j mode — mirrors production query_neo4j() exactly.
+
+        Returns (answer, cypher_query, cypher_rows).
+        There are no Qdrant/vector/NetworkX contexts in this mode — the
+        production path does not retrieve them either.
+        """
+        cypher_query = ""
+        cypher_rows = []
+
+        if not self.neo4j_service:
+            return "Neo4j service not available.", "", []
+
+        cypher_query, err = self.neo4j_service.generate_cypher_from_question(
+            question, self.llm_service
+        )
+        if err:
+            return f"Error generating Cypher: {err}", cypher_query, []
+
+        cypher_rows, exec_err = self.neo4j_service.execute_cypher_query(cypher_query)
+        if exec_err:
+            return f"Error executing Cypher: {exec_err}", cypher_query, []
+
+        context = json.dumps(cypher_rows, indent=2) if cypher_rows else "(no matching entities found in graph)"
+
+        if self.llm_service and self.llm_service.is_available():
+            prompt = (
+                f"Answer the following question based ONLY on the provided Neo4j graph query results. "
+                f"Be concise and precise.\n\nQuestion: {question}\n\n"
+                f"Neo4j Query Results:\n{context}\n\nAnswer:"
+            )
+            answer = self.llm_service._generate_with_gemini(prompt)
+        else:
+            answer = self._format_neo4j_results(cypher_rows, cypher_query)
+
+        return answer, cypher_query, cypher_rows
 
     # ── set_rag_mode: extend to include 'pageindex' ───────────────────────────
 

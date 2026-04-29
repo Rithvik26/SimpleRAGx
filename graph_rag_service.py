@@ -46,50 +46,67 @@ class GraphRAGService:
         
         all_entities = []
         all_relationships = []
-        
+
         total_chunks = len(chunks)
+        _diag_limit = 10  # emit detailed diagnostics for first N chunks
         logger.info(f"Processing {total_chunks} chunks for graph extraction")
-        
+
         if progress_tracker:
-            progress_tracker.update(0, total_chunks, status="graph_extraction", 
+            progress_tracker.update(0, total_chunks, status="graph_extraction",
                                    message="Extracting entities and relationships")
-        
-        # Phase 1: Extract entities and relationships from all chunks
-        for i, chunk in enumerate(chunks):
-            try:
-                chunk_id = f"chunk_{i}_{int(time.time())}"
-                
-                logger.debug(f"Extracting from chunk {i+1}/{total_chunks}")
-                
-                # Extract entities and relationships from this chunk
-                graph_data = self.graph_extractor.extract_entities_and_relationships(
-                    chunk["text"], chunk_id
+
+        # Phase 1: Extract entities and relationships — parallel across all chunks
+        chunk_texts = [c["text"] for c in chunks]
+
+        def _progress(done, total, msg=""):
+            if progress_tracker:
+                progress_tracker.update(done, total, message=msg)
+
+        parallel_result = self.graph_extractor.extract_from_multiple_chunks(
+            chunk_texts,
+            progress_callback=_progress,
+            max_workers=8,
+        )
+
+        # Attach per-chunk source metadata (chunk index, source text, chunk metadata)
+        # extract_from_multiple_chunks returns flat entity/rel lists tagged chunk_0..chunk_N
+        chunk_id_to_index = {f"chunk_{i}": i for i in range(total_chunks)}
+
+        for entity in parallel_result.get("entities", []):
+            # source_chunks list already set by extractor; derive chunk_index from first entry
+            chunk_id = (entity.get("source_chunks") or ["chunk_0"])[0]
+            i = chunk_id_to_index.get(chunk_id, 0)
+            chunk = chunks[i] if i < total_chunks else chunks[0]
+            entity["source_text"] = chunk["text"][:200] + "..." if len(chunk["text"]) > 200 else chunk["text"]
+            entity["metadata"]    = chunk.get("metadata", {})
+            entity["chunk_index"] = i
+
+        for rel in parallel_result.get("relationships", []):
+            chunk_id = rel.get("source_chunk", "chunk_0")
+            i = chunk_id_to_index.get(chunk_id, 0)
+            chunk = chunks[i] if i < total_chunks else chunks[0]
+            rel["source_text"] = chunk["text"][:200] + "..." if len(chunk["text"]) > 200 else chunk["text"]
+            rel["metadata"]    = chunk.get("metadata", {})
+            rel["chunk_index"] = i
+
+        all_entities      = parallel_result.get("entities", [])
+        all_relationships = parallel_result.get("relationships", [])
+
+        # Diagnostics for first _diag_limit chunks
+        seen_chunks: set = set()
+        for entity in all_entities:
+            i = entity.get("chunk_index", 0)
+            if i < _diag_limit and i not in seen_chunks:
+                seen_chunks.add(i)
+                chunk_ents = [e["name"] for e in all_entities if e.get("chunk_index") == i]
+                chunk_rels = [r for r in all_relationships if r.get("chunk_index") == i]
+                text_preview = chunks[i]["text"][:200].replace("\n", " ") if i < total_chunks else ""
+                logger.info(
+                    f"[DIAG chunk {i}] text={text_preview!r} | "
+                    f"entities({len(chunk_ents)})={chunk_ents} | raw_rels={len(chunk_rels)}"
                 )
-                
-                # Add source metadata to entities and relationships
-                for entity in graph_data.get("entities", []):
-                    entity["source_text"] = chunk["text"][:200] + "..." if len(chunk["text"]) > 200 else chunk["text"]
-                    entity["metadata"] = chunk.get("metadata", {})
-                    entity["chunk_index"] = i
-                
-                for rel in graph_data.get("relationships", []):
-                    rel["source_text"] = chunk["text"][:200] + "..." if len(chunk["text"]) > 200 else chunk["text"]
-                    rel["metadata"] = chunk.get("metadata", {})
-                    rel["chunk_index"] = i
-                
-                all_entities.extend(graph_data.get("entities", []))
-                all_relationships.extend(graph_data.get("relationships", []))
-                
-                if progress_tracker:
-                    progress_tracker.update(i + 1, total_chunks, 
-                                           message=f"Extracted from chunk {i + 1} of {total_chunks}")
-                
-                # Small delay to respect API limits
-                time.sleep(0.2)
-                
-            except Exception as e:
-                logger.error(f"Error processing chunk {i}: {str(e)}")
-                continue
+                for r in chunk_rels:
+                    logger.info(f"  [DIAG rel] {r.get('source')} --{r.get('relationship')}--> {r.get('target')}")
         
         logger.info(f"Raw extraction complete: {len(all_entities)} entities, {len(all_relationships)} relationships")
         
@@ -104,35 +121,50 @@ class GraphRAGService:
         # Phase 3: Filter and validate relationships
         validated_relationships = self._validate_relationships(all_relationships, merged_entities)
         logger.info(f"After validation: {len(validated_relationships)} valid relationships")
-        
+
+        # Tag every LLM-extracted relationship with provenance before co-occurrence phase
+        for r in validated_relationships:
+            r.setdefault("provenance", "semantic_llm")
+
+        # Phase 3.5: Co-occurrence fallback — entities sharing a chunk get a typed weak edge.
+        # These are provenance-tagged as co_occurrence so they are never confused with LLM
+        # semantic relationships.
+        existing_pairs = {(r["source"], r["target"]) for r in validated_relationships}
+        cooccur_relationships = self._build_cooccurrence_edges(all_entities, merged_entities, existing_pairs)
+        logger.info(f"Co-occurrence fallback: {len(cooccur_relationships)} CO_OCCURS_WITH edges")
+        all_final_relationships = validated_relationships + cooccur_relationships
+
         # Phase 4: Build NetworkX graph
         if progress_tracker:
             progress_tracker.update(total_chunks + 1, total_chunks + 2, status="graph_building", 
                                    message="Building knowledge graph")
         
-        self._build_graph(merged_entities, validated_relationships)
-        
+        self._build_graph(merged_entities, all_final_relationships)
+
         # Phase 5: Generate embeddings and store in vector DB
         if progress_tracker:
-            progress_tracker.update(total_chunks + 2, total_chunks + 3, status="graph_embedding", 
+            progress_tracker.update(total_chunks + 2, total_chunks + 3, status="graph_embedding",
                                    message="Generating graph embeddings")
-        
-        self._generate_and_store_graph_embeddings(merged_entities, validated_relationships, progress_tracker)
-        
+
+        self._generate_and_store_graph_embeddings(merged_entities, all_final_relationships, progress_tracker)
+
         graph_stats = {
             "nodes": self.graph.number_of_nodes(),
             "edges": self.graph.number_of_edges(),
             "raw_entities": len(all_entities),
             "merged_entities": len(merged_entities),
             "raw_relationships": len(all_relationships),
-            "valid_relationships": len(validated_relationships)
+            "valid_relationships": len(validated_relationships),
+            "cooccurrence_edges": len(cooccur_relationships),
+            "total_edges": len(all_final_relationships),
+            "rejection_stats": getattr(self, "_last_rejection_stats", {}),
         }
-        
+
         logger.info(f"Graph processing complete: {graph_stats}")
-        
+
         return {
             "entities": merged_entities,
-            "relationships": validated_relationships,
+            "relationships": all_final_relationships,
             "graph_stats": graph_stats
         }
     
@@ -254,65 +286,132 @@ class GraphRAGService:
         
         return merged_entity
     
-    def _validate_relationships(self, relationships: List[Dict[str, Any]], 
+    def _validate_relationships(self, relationships: List[Dict[str, Any]],
                               valid_entities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Validate relationships ensuring both entities exist in the entity list."""
+        """Validate relationships ensuring both entities exist, resolving via aliases."""
         if not relationships or not valid_entities:
             return []
-        
-        # Create a mapping from entity names to entities for quick lookup
-        entity_names = set()
-        entity_name_mapping = {}
-        
+
+        # Build alias → canonical and normalized-alias → canonical from ALL aliases in merged entities.
+        # Pre-merge, the LLM used original entity names; after merging the canonical name may differ.
+        alias_to_canonical: Dict[str, str] = {}
+        norm_to_canonical: Dict[str, str] = {}
         for entity in valid_entities:
-            entity_name = entity["name"]
-            entity_names.add(entity_name)
-            # Also add normalized version for fuzzy matching
-            normalized_name = self._normalize_entity_name(entity_name)
-            entity_name_mapping[normalized_name] = entity_name
-        
+            canonical = entity["name"]
+            all_aliases = [canonical] + entity.get("aliases", [])
+            for alias in all_aliases:
+                alias_to_canonical[alias] = canonical
+                norm_key = self._normalize_entity_name(alias)
+                if norm_key:
+                    norm_to_canonical[norm_key] = canonical
+
+        def _resolve(name: str) -> Optional[str]:
+            if name in alias_to_canonical:
+                return alias_to_canonical[name]
+            norm = self._normalize_entity_name(name)
+            return norm_to_canonical.get(norm)
+
         validated_relationships = []
-        
+        rejection_stats: Dict[str, int] = {
+            "no_endpoint": 0, "missing_source": 0, "missing_target": 0, "self_loop": 0
+        }
+
         for rel in relationships:
-            try:
-                source = rel.get("source", "")
-                target = rel.get("target", "")
-                
-                if not source or not target:
-                    continue
-                
-                # Check direct matches first
-                source_exists = source in entity_names
-                target_exists = target in entity_names
-                
-                # If direct match fails, try normalized matching
-                if not source_exists:
-                    normalized_source = self._normalize_entity_name(source)
-                    if normalized_source in entity_name_mapping:
-                        source = entity_name_mapping[normalized_source]
-                        source_exists = True
-                
-                if not target_exists:
-                    normalized_target = self._normalize_entity_name(target)
-                    if normalized_target in entity_name_mapping:
-                        target = entity_name_mapping[normalized_target]
-                        target_exists = True
-                
-                # Only include relationship if both entities exist
-                if source_exists and target_exists and source != target:
-                    # Update the relationship with corrected entity names
-                    validated_rel = rel.copy()
-                    validated_rel["source"] = source
-                    validated_rel["target"] = target
-                    validated_relationships.append(validated_rel)
-                
-            except Exception as e:
-                logger.debug(f"Error validating relationship: {e}")
+            source_raw = rel.get("source", "")
+            target_raw = rel.get("target", "")
+
+            if not source_raw or not target_raw:
+                rejection_stats["no_endpoint"] += 1
                 continue
-        
-        logger.debug(f"Relationship validation: {len(relationships)} -> {len(validated_relationships)}")
+
+            resolved_source = _resolve(source_raw)
+            resolved_target = _resolve(target_raw)
+
+            if not resolved_source:
+                rejection_stats["missing_source"] += 1
+                logger.debug(f"Rejected (missing source): '{source_raw}' → '{target_raw}'")
+                continue
+            if not resolved_target:
+                rejection_stats["missing_target"] += 1
+                logger.debug(f"Rejected (missing target): '{source_raw}' → '{target_raw}'")
+                continue
+            if resolved_source == resolved_target:
+                rejection_stats["self_loop"] += 1
+                continue
+
+            validated_rel = rel.copy()
+            validated_rel["source"] = resolved_source
+            validated_rel["target"] = resolved_target
+            validated_relationships.append(validated_rel)
+
+        logger.info(
+            f"Relationship validation: {len(relationships)} raw → {len(validated_relationships)} valid | "
+            f"rejections: {rejection_stats}"
+        )
+        self._last_rejection_stats = rejection_stats
         return validated_relationships
-    
+
+    def _build_cooccurrence_edges(
+        self,
+        all_entities: List[Dict[str, Any]],
+        merged_entities: List[Dict[str, Any]],
+        existing_pairs: Set[Tuple[str, str]],
+    ) -> List[Dict[str, Any]]:
+        """Return CO_OCCURS_WITH edges for entity pairs sharing a chunk with no existing link.
+
+        Edges are provenance=co_occurrence — never confused with semantic relationships.
+        Caps prevent weak edges from drowning semantic ones:
+          max_cooccurrence_per_chunk  — max CO_OCCURS_WITH edges emitted per chunk
+          max_cooccurrence_edges_total — max total across the whole document
+        """
+        max_per_chunk = self.config.get("max_cooccurrence_per_chunk", 10)
+        max_total     = self.config.get("max_cooccurrence_edges_total", 100)
+
+        alias_to_canonical: Dict[str, str] = {}
+        for entity in merged_entities:
+            canonical = entity["name"]
+            for alias in [canonical] + entity.get("aliases", []):
+                alias_to_canonical[alias] = canonical
+
+        # Group resolved canonical names by chunk index
+        chunk_entity_map: Dict[int, Set[str]] = defaultdict(set)
+        for e in all_entities:
+            canonical = alias_to_canonical.get(e["name"], e["name"])
+            chunk_entity_map[e.get("chunk_index", -1)].add(canonical)
+
+        cooccur: List[Dict[str, Any]] = []
+        seen: Set[Tuple[str, str]] = set(existing_pairs)
+        # Also seed reverse direction so we don't add (B,A) when (A,B) exists
+        seen.update((b, a) for a, b in existing_pairs)
+
+        for chunk_idx, canonicals in chunk_entity_map.items():
+            if len(cooccur) >= max_total:
+                break
+            canon_list = sorted(canonicals)
+            chunk_count = 0
+            for i in range(len(canon_list)):
+                if chunk_count >= max_per_chunk or len(cooccur) >= max_total:
+                    break
+                for j in range(i + 1, len(canon_list)):
+                    if chunk_count >= max_per_chunk or len(cooccur) >= max_total:
+                        break
+                    a, b = canon_list[i], canon_list[j]
+                    if (a, b) in seen or (b, a) in seen:
+                        continue
+                    seen.add((a, b))
+                    cooccur.append({
+                        "source":       a,
+                        "target":       b,
+                        "relationship": "CO_OCCURS_WITH",
+                        "description":  f"Co-occurs in chunk {chunk_idx}",
+                        "source_chunk": f"chunk_{chunk_idx}",
+                        "source_text":  "",
+                        "provenance":   "co_occurrence",
+                    })
+                    chunk_count += 1
+
+        return cooccur
+
     def _build_graph(self, entities: List[Dict[str, Any]], relationships: List[Dict[str, Any]]):
         """Build NetworkX graph from entities and relationships."""
         # Clear existing graph
@@ -363,111 +462,67 @@ class GraphRAGService:
         
         logger.info(f"Graph built: {self.graph.number_of_nodes()} nodes, {self.graph.number_of_edges()} edges")
     
-    def _generate_and_store_graph_embeddings(self, entities: List[Dict[str, Any]], 
-                                           relationships: List[Dict[str, Any]], 
+    def _generate_and_store_graph_embeddings(self, entities: List[Dict[str, Any]],
+                                           relationships: List[Dict[str, Any]],
                                            progress_tracker: Optional[ProgressTracker] = None):
         """Generate embeddings for entities and relationships and store in vector DB."""
         if not self.embedding_service or not self.vector_db_service:
             logger.warning("Embedding or Vector DB service not available for graph embeddings")
             return
-        
-        # Prepare documents for vector storage
-        graph_documents = []
-        graph_embeddings = []
-        
-        total_items = len(entities) + len(relationships)
-        current_item = 0
-        
-        if progress_tracker:
-            progress_tracker.update(0, total_items, status="graph_embedding", 
-                                  message="Generating graph embeddings")
-        
-        # Process entities
-        logger.debug(f"Processing {len(entities)} entities for embedding")
+
+        # Build all texts and docs in one pass — no per-item API calls
+        texts: List[str] = []
+        graph_documents: List[Dict[str, Any]] = []
+
         for entity in entities:
-            try:
-                # Create rich text representation for embedding
-                entity_text = self._create_entity_embedding_text(entity)
-                
-                # Generate embedding with retry logic
-                embedding = self._get_embedding_with_retry(entity_text)
-                
-                if embedding is None:
-                    logger.warning(f"Failed to generate embedding for entity: {entity['name']}")
-                    continue
-                
-                # Prepare document for vector storage
-                entity_doc = {
-                    "text": entity_text,
-                    "metadata": {
-                        "type": "entity",
-                        "entity_name": entity["name"],
-                        "entity_type": entity.get("type", "UNKNOWN"),
-                        "description": entity.get("description", ""),
-                        "source_chunks": entity.get("source_chunks", []),
-                        "graph_element": True,
-                        "merged_from": entity.get("merged_from", 1)
-                    }
+            text = self._create_entity_embedding_text(entity)
+            texts.append(text)
+            graph_documents.append({
+                "text": text,
+                "metadata": {
+                    "type": "entity",
+                    "entity_name": entity["name"],
+                    "entity_type": entity.get("type", "UNKNOWN"),
+                    "description": entity.get("description", ""),
+                    "source_chunks": entity.get("source_chunks", []),
+                    "graph_element": True,
+                    "merged_from": entity.get("merged_from", 1)
                 }
-                
-                graph_documents.append(entity_doc)
-                graph_embeddings.append(embedding)
-                
-            except Exception as e:
-                logger.error(f"Error processing entity {entity.get('name', 'unknown')}: {e}")
-                continue
-            
-            current_item += 1
-            if progress_tracker:
-                progress_tracker.update(current_item, total_items, 
-                                      message=f"Processed entity {current_item} of {total_items}")
-        
-        # Process relationships
-        logger.debug(f"Processing {len(relationships)} relationships for embedding")
+            })
+
         for rel in relationships:
-            try:
-                # Create rich text representation for embedding
-                rel_text = self._create_relationship_embedding_text(rel)
-                
-                # Generate embedding with retry logic
-                embedding = self._get_embedding_with_retry(rel_text)
-                
-                if embedding is None:
-                    logger.warning(f"Failed to generate embedding for relationship: {rel['source']} -> {rel['target']}")
-                    continue
-                
-                # Prepare document for vector storage
-                rel_doc = {
-                    "text": rel_text,
-                    "metadata": {
-                        "type": "relationship",
-                        "source": rel["source"],
-                        "target": rel["target"],
-                        "relationship": rel.get("relationship", ""),
-                        "description": rel.get("description", ""),
-                        "source_chunk": rel.get("source_chunk", ""),
-                        "graph_element": True
-                    }
+            text = self._create_relationship_embedding_text(rel)
+            texts.append(text)
+            graph_documents.append({
+                "text": text,
+                "metadata": {
+                    "type": "relationship",
+                    "source": rel["source"],
+                    "target": rel["target"],
+                    "relationship": rel.get("relationship", ""),
+                    "description": rel.get("description", ""),
+                    "source_chunk": rel.get("source_chunk", ""),
+                    "graph_element": True
                 }
-                
-                graph_documents.append(rel_doc)
-                graph_embeddings.append(embedding)
-                
-            except Exception as e:
-                logger.error(f"Error processing relationship {rel.get('source', 'unknown')} -> {rel.get('target', 'unknown')}: {e}")
-                continue
-            
-            current_item += 1
-            if progress_tracker:
-                progress_tracker.update(current_item, total_items, 
-                                      message=f"Processed relationship {current_item} of {total_items}")
-        
-        # Store in vector database (graph collection)
-        if graph_documents and graph_embeddings:
-            logger.info(f"Storing {len(graph_documents)} graph elements in vector DB")
-            self._store_graph_in_vector_db(graph_documents, graph_embeddings, progress_tracker)
-        else:
+            })
+
+        if not texts:
             logger.warning("No graph elements to store in vector database")
+            return
+
+        if progress_tracker:
+            progress_tracker.update(0, len(texts), status="graph_embedding",
+                                    message="Generating graph embeddings")
+
+        # Single batch call — uses batchEmbedContents (50 texts/request)
+        graph_embeddings = self.embedding_service.get_embeddings_batch(texts, progress_tracker=progress_tracker)
+
+        if len(graph_embeddings) != len(graph_documents):
+            logger.error(f"Embedding count mismatch: {len(graph_embeddings)} vs {len(graph_documents)} docs")
+            return
+
+        logger.info(f"Storing {len(graph_documents)} graph elements in vector DB")
+        self._store_graph_in_vector_db(graph_documents, graph_embeddings, progress_tracker)
     
     def _create_entity_embedding_text(self, entity: Dict[str, Any]) -> str:
         """Create rich text representation for entity embedding."""
@@ -551,140 +606,133 @@ class GraphRAGService:
             logger.error(f"Error storing graph in vector DB: {str(e)}")
             raise
     
-    def search_graph(self, query: str, top_k: int = 10) -> List[Dict[str, Any]]:
-        """Search the knowledge graph using vector similarity AND NetworkX graph traversal.
-        
-        This is true Graph RAG:
-        1. Vector search finds semantically similar entities/relationships
-        2. NetworkX traversal discovers connected entities (multi-hop reasoning)
-        3. Results are combined and deduplicated
+    def search_graph(self, query: str, top_k: int = 10, neo4j_service=None) -> List[Dict[str, Any]]:
+        """Search knowledge graph: Qdrant vector search for seeds, Neo4j Cypher traversal for neighborhoods.
+
+        NetworkX is NOT used for traversal. If neo4j_service is None, returns vector-only
+        results with a warning — production graph mode requires Neo4j.
         """
         if not self.embedding_service or not self.vector_db_service:
             logger.warning("Services not available for graph search")
             return []
-        
+
         try:
-            # === STEP 1: Vector similarity search (find seed entities) ===
+            # Step 1: Qdrant vector search — find semantically similar entities / relationships
             query_embedding = self.embedding_service.get_embedding(query)
             collection_name = self.config["graph_collection_name"]
-            
+
             vector_results = self.vector_db_service.search_similar(
                 query_embedding,
                 top_k=top_k,
-                collection_name=collection_name
+                collection_name=collection_name,
             )
-            
-            logger.debug(f"Vector search returned {len(vector_results)} results")
-            
-            # === STEP 2: Extract seed entities from vector results ===
-            seed_entities = []
-            for result in vector_results:
-                if result['metadata'].get('type') == 'entity':
-                    entity_name = result['metadata'].get('entity_name')
-                    if entity_name:
-                        seed_entities.append(entity_name)
-            
-            logger.debug(f"Found {len(seed_entities)} seed entities for traversal: {seed_entities[:5]}")
-            
-            # === STEP 3: NetworkX graph traversal from seed entities ===
-            traversal_results = []
-            visited_entities = set()
-            visited_relationships = set()
-            
-            # Only traverse if we have a graph with nodes
-            if self.graph.number_of_nodes() > 0 and seed_entities:
-                # Limit seeds to prevent explosion
-                for seed in seed_entities[:3]:
-                    if seed and seed in self.graph.nodes:
-                        neighborhood = self.get_entity_neighborhood(
-                            seed, 
-                            depth=self.graph_reasoning_depth
-                        )
-                        
-                        # Add discovered entities
-                        for entity in neighborhood['entities']:
-                            entity_name = entity['name']
-                            if entity_name not in visited_entities:
-                                visited_entities.add(entity_name)
-                                
-                                # Calculate score based on distance from seed
-                                distance = entity.get('distance_from_center', 1)
-                                traversal_score = 0.85 - (distance * 0.15)
-                                
-                                traversal_results.append({
-                                    'text': f"Entity: {entity_name} | Type: {entity.get('type', 'UNKNOWN')} | Description: {entity.get('description', '')}",
-                                    'metadata': {
-                                        'type': 'entity',
-                                        'entity_name': entity_name,
-                                        'entity_type': entity.get('type', 'UNKNOWN'),
-                                        'description': entity.get('description', ''),
-                                        'discovery_method': 'graph_traversal',
-                                        'seed_entity': seed,
-                                        'distance_from_seed': distance
-                                    },
-                                    'score': traversal_score
-                                })
-                        
-                        # Add discovered relationships
-                        for rel in neighborhood['relationships']:
-                            rel_key = f"{rel['source']}|{rel['relationship']}|{rel['target']}"
-                            if rel_key not in visited_relationships:
-                                visited_relationships.add(rel_key)
-                                
-                                traversal_results.append({
-                                    'text': f"Relationship: {rel['source']} → {rel['relationship']} → {rel['target']} | Description: {rel.get('description', '')}",
-                                    'metadata': {
-                                        'type': 'relationship',
-                                        'source': rel['source'],
-                                        'target': rel['target'],
-                                        'relationship': rel['relationship'],
-                                        'description': rel.get('description', ''),
-                                        'discovery_method': 'graph_traversal',
-                                        'seed_entity': seed
-                                    },
-                                    'score': 0.75
-                                })
-                
-                logger.debug(f"Graph traversal discovered {len(traversal_results)} additional results")
-            else:
-                logger.debug("NetworkX graph empty or no seed entities - skipping traversal")
-            
-            # === STEP 4: Combine and deduplicate results ===
-            # Track what we've already seen from vector search
-            seen_entities = set()
-            seen_relationships = set()
-            
-            for result in vector_results:
-                if result['metadata'].get('type') == 'entity':
-                    seen_entities.add(result['metadata'].get('entity_name'))
-                elif result['metadata'].get('type') == 'relationship':
-                    rel_key = f"{result['metadata'].get('source')}|{result['metadata'].get('relationship')}|{result['metadata'].get('target')}"
-                    seen_relationships.add(rel_key)
-            
-            # Add traversal results that weren't in vector results
-            unique_traversal_results = []
-            for result in traversal_results:
-                if result['metadata'].get('type') == 'entity':
-                    if result['metadata'].get('entity_name') not in seen_entities:
-                        unique_traversal_results.append(result)
-                elif result['metadata'].get('type') == 'relationship':
-                    rel_key = f"{result['metadata'].get('source')}|{result['metadata'].get('relationship')}|{result['metadata'].get('target')}"
-                    if rel_key not in seen_relationships:
-                        unique_traversal_results.append(result)
-            
-            # Combine: vector results first (higher confidence), then traversal discoveries
-            combined_results = vector_results + unique_traversal_results
-            
-            # Sort by score and limit to top_k
-            combined_results.sort(key=lambda x: x.get('score', 0), reverse=True)
-            final_results = combined_results[:top_k]
-            
-            logger.info(f"Graph search complete: {len(vector_results)} vector + {len(unique_traversal_results)} traversal = {len(final_results)} final results")
-            
-            return final_results
-            
+
+            logger.debug(f"Graph vector search: {len(vector_results)} results")
+
+            if not vector_results:
+                return []
+
+            # Step 2: Extract seed entity names from vector results
+            seed_names: List[str] = []
+            for r in vector_results:
+                if r["metadata"].get("type") == "entity":
+                    name = r["metadata"].get("entity_name")
+                    if name:
+                        seed_names.append(name)
+
+            logger.debug(f"Graph seeds: {seed_names[:5]}")
+
+            # Step 3: Neo4j Cypher traversal from seeds
+            traversal_results: List[Dict[str, Any]] = []
+
+            if neo4j_service is None:
+                logger.warning(
+                    "graph mode: Neo4j not configured — returning vector-only graph results. "
+                    "Production graph mode requires Neo4j for topology traversal."
+                )
+            elif seed_names:
+                depth            = self.config.get("graph_reasoning_depth", 2)
+                benchmark_corpus = self.config.get("benchmark_corpus_tag", "")
+                rows = neo4j_service.traverse_neighbors(
+                    seed_names[:5], depth=depth, limit=top_k * 3,
+                    benchmark_corpus=benchmark_corpus,
+                )
+
+                seen_triplets: Set[str] = set()
+                for row in rows:
+                    source = row.get("seed_name", "")
+                    rel    = row.get("relationship", "")
+                    target = row.get("neighbor_name", "")
+                    key    = f"{source}|{rel}|{target}"
+                    if key in seen_triplets or not source or not target:
+                        continue
+                    seen_triplets.add(key)
+
+                    rel_desc   = row.get("rel_description", "")
+                    tgt_desc   = row.get("neighbor_description", "")
+                    src_text   = row.get("source_text", "")
+                    tgt_type   = row.get("neighbor_type", "")
+                    provenance = row.get("provenance") or "semantic_llm"
+
+                    parts = [f"Relationship: {source} → {rel} → {target}"]
+                    if rel_desc:
+                        parts.append(f"Description: {rel_desc}")
+                    if tgt_desc:
+                        parts.append(f"Neighbor: {target} ({tgt_type}) — {tgt_desc}")
+
+                    traversal_results.append({
+                        "text": " | ".join(parts),
+                        "metadata": {
+                            "type":                  "relationship",
+                            "source":                source,
+                            "source_type":           row.get("seed_type", ""),
+                            "relationship":          rel,
+                            "rel_description":       rel_desc,
+                            "target":                target,
+                            "target_type":           tgt_type,
+                            "target_description":    tgt_desc,
+                            "source_text":           src_text,
+                            "neighbor_source_texts": row.get("neighbor_source_texts", ""),
+                            "discovery_method":      "neo4j_traversal",
+                            "seed_entity":           source,
+                            "provenance":            provenance,
+                            "rel_benchmark_corpus":  row.get("rel_benchmark_corpus", ""),
+                            "graph_element":         True,
+                        },
+                        "score": None,
+                    })
+
+                logger.info(
+                    f"Neo4j traversal: {len(rows)} rows → {len(traversal_results)} unique triplets"
+                )
+
+            # Step 4: Deduplicate and combine
+            seen_rels: Set[str] = set()
+            for r in vector_results:
+                if r["metadata"].get("type") == "relationship":
+                    k = (f"{r['metadata'].get('source')}|"
+                         f"{r['metadata'].get('relationship')}|"
+                         f"{r['metadata'].get('target')}")
+                    seen_rels.add(k)
+
+            unique_traversal = [
+                r for r in traversal_results
+                if f"{r['metadata']['source']}|{r['metadata']['relationship']}|{r['metadata']['target']}"
+                not in seen_rels
+            ]
+
+            combined = vector_results + unique_traversal
+            combined.sort(key=lambda x: (x.get("score") or 0), reverse=True)
+            final = combined[:top_k * 2]
+
+            logger.info(
+                f"Graph search: {len(vector_results)} vector + {len(unique_traversal)} traversal"
+                f" → {len(final)} combined"
+            )
+            return final
+
         except Exception as e:
-            logger.error(f"Error searching graph: {str(e)}")
+            logger.error(f"Error searching graph: {e}")
             return []
     
     def get_entity_neighborhood(self, entity_name: str, depth: int = None) -> Dict[str, Any]:

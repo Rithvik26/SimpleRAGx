@@ -78,10 +78,12 @@ class Neo4jService:
     def create_indexes(self):
         """Create necessary indexes for performance."""
         indexes = [
-            "CREATE INDEX entity_id_idx   IF NOT EXISTS FOR (e:Entity)   ON (e.id)",
-            "CREATE INDEX entity_name_idx IF NOT EXISTS FOR (e:Entity)   ON (e.name)",
-            "CREATE INDEX entity_type_idx IF NOT EXISTS FOR (e:Entity)   ON (e.type)",
-            "CREATE INDEX document_name_idx IF NOT EXISTS FOR (d:Document) ON (d.name)",
+            "CREATE INDEX entity_id_idx           IF NOT EXISTS FOR (e:Entity)   ON (e.id)",
+            "CREATE INDEX entity_name_idx         IF NOT EXISTS FOR (e:Entity)   ON (e.name)",
+            "CREATE INDEX entity_type_idx         IF NOT EXISTS FOR (e:Entity)   ON (e.type)",
+            "CREATE INDEX entity_corpus_idx       IF NOT EXISTS FOR (e:Entity)   ON (e.benchmark_corpus)",
+            "CREATE INDEX document_name_idx       IF NOT EXISTS FOR (d:Document) ON (d.name)",
+            "CREATE INDEX document_corpus_idx     IF NOT EXISTS FOR (d:Document) ON (d.benchmark_corpus)",
         ]
         
         try:
@@ -97,25 +99,50 @@ class Neo4jService:
     def store_entities_and_relationships(self,
                                          entities: List[Dict[str, Any]],
                                          relationships: List[Dict[str, Any]],
-                                         document_name: str = None) -> Dict[str, int]:
+                                         document_name: str = None,
+                                         benchmark_corpus: str = "",
+                                         doc_metadata: Dict[str, Any] = None) -> Dict[str, int]:
         """
         Store entities and relationships using UNWIND batches.
         1 network round-trip per 500 entities instead of 1 per entity — ~100x faster on cloud Neo4j.
+
+        doc_metadata — optional dict with keys: title, source, category, published_at, url.
+        benchmark_corpus — tag stored on all Entity nodes for namespace isolation.
         """
         stats = {"entities_created": 0, "relationships_created": 0, "errors": 0}
         ts = datetime.now().isoformat()
+        doc_metadata = doc_metadata or {}
 
         try:
             with self._session() as session:
-                # ── Document node (single call) ──────────────────────────────
+                # ── Document node (single call) with full metadata ────────────
                 if document_name:
                     session.run(
                         """
                         MERGE (d:Document {name: $doc_name})
-                        ON CREATE SET d.created_at = $ts
-                        ON MATCH  SET d.updated_at = $ts
+                        ON CREATE SET d.created_at  = $ts,
+                                      d.title        = $title,
+                                      d.source       = $source,
+                                      d.category     = $category,
+                                      d.published_at = $published_at,
+                                      d.url          = $url,
+                                      d.benchmark_corpus = $benchmark_corpus
+                        ON MATCH  SET d.updated_at  = $ts,
+                                      d.title        = $title,
+                                      d.source       = $source,
+                                      d.category     = $category,
+                                      d.published_at = $published_at,
+                                      d.url          = $url,
+                                      d.benchmark_corpus = $benchmark_corpus
                         """,
-                        doc_name=document_name, ts=ts,
+                        doc_name=document_name,
+                        ts=ts,
+                        title=doc_metadata.get("title", document_name),
+                        source=doc_metadata.get("source", ""),
+                        category=doc_metadata.get("category", ""),
+                        published_at=doc_metadata.get("published_at", ""),
+                        url=doc_metadata.get("url", ""),
+                        benchmark_corpus=benchmark_corpus,
                     )
 
                 # ── Entities — UNWIND in batches ─────────────────────────────
@@ -125,16 +152,17 @@ class Neo4jService:
                         e.get("name", ""), e.get("type", "UNKNOWN")
                     )
                     entity_rows.append({
-                        "id":           eid,
-                        "name":         e.get("name", ""),
-                        "type":         e.get("type", "UNKNOWN"),
-                        "aliases":      json.dumps(e.get("aliases", [e.get("name", "")])),
-                        "description":  e.get("description", ""),
-                        "source_chunks": json.dumps(e.get("source_chunks", [])),
-                        "source_texts": json.dumps(e.get("source_texts", [])),
-                        "merged_from":  e.get("merged_from", 1),
-                        "ts":           ts,
-                        "doc_name":     document_name or "",
+                        "id":              eid,
+                        "name":            e.get("name", ""),
+                        "type":            e.get("type", "UNKNOWN"),
+                        "aliases":         json.dumps(e.get("aliases", [e.get("name", "")])),
+                        "description":     e.get("description", ""),
+                        "source_chunks":   json.dumps(e.get("source_chunks", [])),
+                        "source_texts":    json.dumps(e.get("source_texts", [])),
+                        "merged_from":     e.get("merged_from", 1),
+                        "benchmark_corpus": benchmark_corpus,
+                        "ts":              ts,
+                        "doc_name":        document_name or "",
                     })
 
                 for i in range(0, len(entity_rows), self._BATCH_SIZE):
@@ -144,18 +172,19 @@ class Neo4jService:
                             """
                             UNWIND $rows AS row
                             MERGE (e:Entity {id: row.id})
-                            SET e.name         = row.name,
-                                e.type         = row.type,
-                                e.aliases      = row.aliases,
-                                e.description  = row.description,
-                                e.source_chunks = row.source_chunks,
-                                e.source_texts  = row.source_texts,
-                                e.merged_from  = row.merged_from,
-                                e.updated_at   = row.ts
+                            SET e.name             = row.name,
+                                e.type             = row.type,
+                                e.aliases          = row.aliases,
+                                e.description      = row.description,
+                                e.source_chunks    = row.source_chunks,
+                                e.source_texts     = row.source_texts,
+                                e.merged_from      = row.merged_from,
+                                e.benchmark_corpus = row.benchmark_corpus,
+                                e.updated_at       = row.ts
                             WITH e, row
                             WHERE row.doc_name <> ''
                             MATCH (d:Document {name: row.doc_name})
-                            MERGE (e)-[:EXTRACTED_FROM]->(d)
+                            MERGE (e)-[:MENTIONED_IN]->(d)
                             """,
                             rows=batch,
                         )
@@ -177,16 +206,21 @@ class Neo4jService:
                     target = r.get("target", "")
                     if not source or not target:
                         continue
+                    edge_kind = r.get("relationship", "")
                     rel_rows.append({
-                        "source_id":    name_to_id.get(source) or _canonical_id(source, r.get("source_type", "UNKNOWN")),
-                        "target_id":    name_to_id.get(target) or _canonical_id(target, r.get("target_type", "UNKNOWN")),
-                        "source_name":  source,
-                        "target_name":  target,
-                        "relationship": r.get("relationship", ""),
-                        "description":  r.get("description", ""),
-                        "source_chunk": r.get("source_chunk", ""),
-                        "source_text":  r.get("source_text", ""),
-                        "ts":           ts,
+                        "source_id":        name_to_id.get(source) or _canonical_id(source, r.get("source_type", "UNKNOWN")),
+                        "target_id":        name_to_id.get(target) or _canonical_id(target, r.get("target_type", "UNKNOWN")),
+                        "source_name":      source,
+                        "target_name":      target,
+                        "relationship":     edge_kind,
+                        "edge_kind":        edge_kind,
+                        "description":      r.get("description", ""),
+                        "source_chunk":     r.get("source_chunk", ""),
+                        "source_text":      r.get("source_text", ""),
+                        "provenance":       r.get("provenance", "semantic_llm"),
+                        "benchmark_corpus": benchmark_corpus,
+                        "document_name":    document_name or "",
+                        "ts":               ts,
                     })
 
                 for i in range(0, len(rel_rows), self._BATCH_SIZE):
@@ -197,11 +231,17 @@ class Neo4jService:
                             UNWIND $rows AS row
                             MATCH (s:Entity {id: row.source_id})
                             MATCH (t:Entity {id: row.target_id})
-                            MERGE (s)-[r:RELATES_TO {relationship: row.relationship}]->(t)
-                            SET r.description  = row.description,
-                                r.source_chunk = row.source_chunk,
-                                r.source_text  = row.source_text,
-                                r.updated_at   = row.ts
+                            MERGE (s)-[r:RELATES_TO {relationship: row.relationship,
+                                                      provenance:   row.provenance}]->(t)
+                            SET r.edge_kind        = row.edge_kind,
+                                r.description      = row.description,
+                                r.source_chunk     = row.source_chunk,
+                                r.source_text      = row.source_text,
+                                r.source_name      = row.source_name,
+                                r.target_name      = row.target_name,
+                                r.benchmark_corpus = row.benchmark_corpus,
+                                r.document_name    = row.document_name,
+                                r.updated_at       = row.ts
                             """,
                             rows=batch,
                         )
@@ -243,7 +283,7 @@ class Neo4jService:
         )
         if document_name:
             session.run(
-                "MATCH (e:Entity {id:$eid}),(d:Document {name:$dn}) MERGE (e)-[:EXTRACTED_FROM]->(d)",
+                "MATCH (e:Entity {id:$eid}),(d:Document {name:$dn}) MERGE (e)-[:MENTIONED_IN]->(d)",
                 eid=eid, dn=document_name,
             )
 
@@ -463,23 +503,37 @@ SAMPLE DATA STRUCTURE:
             return "Schema information unavailable"
     
     def get_graph_stats(self) -> Dict[str, int]:
-        """Get basic statistics about the graph."""
+        """Get basic statistics about the graph.
+
+        Uses separate aggregations — the old pattern
+        MATCH (n:Entity) OPTIONAL MATCH ()-[r]->() RETURN count(n), count(r)
+        is a Cartesian product that inflates relationship_count by node_count.
+        """
         try:
             with self._session() as session:
-                stats = session.run("""
-                    MATCH (n:Entity) 
-                    OPTIONAL MATCH ()-[r:RELATES_TO]->()
-                    RETURN count(DISTINCT n) as node_count, 
-                           count(r) as relationship_count
-                """).single()
-                
+                node_count = session.run(
+                    "MATCH (n:Entity) RETURN count(n) AS c"
+                ).single()["c"]
+
+                rel_row = session.run(
+                    """
+                    MATCH ()-[r:RELATES_TO]->()
+                    RETURN count(r) AS total,
+                           sum(CASE WHEN r.provenance = 'co_occurrence' THEN 1 ELSE 0 END) AS co_occ,
+                           sum(CASE WHEN coalesce(r.provenance, 'semantic_llm') <> 'co_occurrence'
+                                    THEN 1 ELSE 0 END) AS semantic
+                    """
+                ).single()
+
                 return {
-                    "nodes": stats["node_count"],
-                    "relationships": stats["relationship_count"]
+                    "nodes":                   node_count,
+                    "relationships":           rel_row["total"],
+                    "semantic_relationships":  rel_row["semantic"],
+                    "cooccurrence_edges":      rel_row["co_occ"],
                 }
         except Exception as e:
             logger.error(f"Error getting graph stats: {e}")
-            return {"nodes": 0, "relationships": 0}
+            return {"nodes": 0, "relationships": 0, "semantic_relationships": 0, "cooccurrence_edges": 0}
     
     def search_entities_by_name(self, name_query: str, limit: int = 10) -> List[Dict]:
         """Search entities by name similarity."""
@@ -492,12 +546,105 @@ SAMPLE DATA STRUCTURE:
                     RETURN e.name as name, e.type as type, e.description as description
                     LIMIT $limit
                 """, query=name_query, limit=limit)
-                
+
                 return [dict(record) for record in results]
-                
+
         except Exception as e:
             logger.error(f"Error searching entities: {e}")
             return []
+
+    def _execute_parameterized(self, cypher: str, params: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str]:
+        """Execute a parameterized Cypher query and return (records, error_or_empty)."""
+        try:
+            with self._session() as session:
+                result = session.run(cypher, **params)
+                records = []
+                for record in result:
+                    row = {}
+                    for key in record.keys():
+                        value = record[key]
+                        if value is None:
+                            row[key] = None
+                        elif isinstance(value, (str, int, float, bool)):
+                            row[key] = value
+                        elif isinstance(value, list):
+                            row[key] = [dict(item) if hasattr(item, "__dict__") else item for item in value]
+                        elif hasattr(value, "__dict__"):
+                            row[key] = dict(value)
+                        else:
+                            row[key] = str(value)
+                    records.append(row)
+                return records, ""
+        except Neo4jError as e:
+            return [], str(e)
+        except Exception as e:
+            return [], str(e)
+
+    def traverse_neighbors(
+        self,
+        seed_names: List[str],
+        depth: int = 2,
+        limit: int = 30,
+        benchmark_corpus: str = "",
+    ) -> List[Dict[str, Any]]:
+        """Traverse entity neighbors from seed entity names using Cypher.
+
+        Depth 1: direct RELATES_TO neighbors.
+        Depth 2: also includes second-hop neighbors (hop-1 names used as new seeds).
+
+        benchmark_corpus — when non-empty, filters seed and neighbor entities AND
+                           relationships to that corpus tag, preventing cross-benchmark
+                           contamination (e.g. AMD/Boeing data leaking into multihop results).
+
+        Returns list of dicts with keys:
+            seed_name, seed_type, relationship, provenance, rel_benchmark_corpus,
+            rel_description, source_text, neighbor_name, neighbor_type,
+            neighbor_description, neighbor_source_texts
+        """
+        if not seed_names:
+            return []
+
+        # $benchmark_corpus = '' disables filtering (WHERE clause becomes always-true)
+        cypher_hop = """
+        MATCH (seed:Entity)
+        WHERE seed.name IN $seed_names
+          AND ($benchmark_corpus = '' OR seed.benchmark_corpus = $benchmark_corpus)
+        MATCH (seed)-[r:RELATES_TO]-(neighbor:Entity)
+        WHERE neighbor.name <> seed.name
+          AND ($benchmark_corpus = '' OR neighbor.benchmark_corpus = $benchmark_corpus)
+        RETURN seed.name              AS seed_name,
+               seed.type              AS seed_type,
+               r.relationship         AS relationship,
+               r.provenance           AS provenance,
+               r.benchmark_corpus     AS rel_benchmark_corpus,
+               r.description          AS rel_description,
+               r.source_text          AS source_text,
+               neighbor.name          AS neighbor_name,
+               neighbor.type          AS neighbor_type,
+               neighbor.description   AS neighbor_description,
+               neighbor.source_texts  AS neighbor_source_texts
+        LIMIT $limit
+        """
+
+        params = {"seed_names": seed_names, "limit": limit, "benchmark_corpus": benchmark_corpus}
+        rows, err = self._execute_parameterized(cypher_hop, params)
+        if err:
+            logger.warning(f"Neo4j traverse_neighbors depth-1 error: {err}")
+            return []
+
+        if depth >= 2 and rows:
+            hop1_names = list({r["neighbor_name"] for r in rows if r.get("neighbor_name")})
+            remaining = max(0, limit - len(rows))
+            if hop1_names and remaining > 0:
+                rows2, err2 = self._execute_parameterized(
+                    cypher_hop,
+                    {"seed_names": hop1_names, "limit": remaining, "benchmark_corpus": benchmark_corpus},
+                )
+                if not err2:
+                    rows = rows + rows2
+
+        logger.debug(f"traverse_neighbors: {len(seed_names)} seeds → {len(rows)} triplets (depth={depth})")
+        return rows
 
 # Factory function for easy initialization
 def create_neo4j_service(config: Dict[str, str]) -> Optional[Neo4jService]:

@@ -85,7 +85,12 @@ _rag_cache: Dict[str, Any] = {}  # mode -> SimpleRAG instance (reuse across ques
 
 
 def _query_mode(mode: str, question: str, cfg: Dict) -> Dict[str, Any]:
-    """Run a single question through the given mode. Returns {answer, contexts}."""
+    """Run a single question through the given mode. Returns {answer, contexts}.
+
+    Uses query_debug() to capture retrieved contexts properly. The old
+    query() path returned only a plain string, making context_precision and
+    context_recall always 0.
+    """
     if mode not in _rag_cache:
         from config import ConfigManager
         from simple_rag import SimpleRAG
@@ -102,12 +107,21 @@ def _query_mode(mode: str, question: str, cfg: Dict) -> Dict[str, Any]:
     else:
         rag = _rag_cache[mode]
 
-    result = rag.query(question)
-    if isinstance(result, str):
-        result = {"answer": result, "sources": []}
-    answer   = result.get("answer", "")
-    sources  = result.get("sources", result.get("context_chunks", []))
-    contexts = [s.get("text", s.get("content", "")) if isinstance(s, dict) else str(s) for s in sources if s]
+    # Use query_debug() so we actually capture retrieved contexts.
+    # query() returns a plain str; context_precision/recall were always 0.
+    debug = rag.query_debug(question)
+    answer = debug.get("answer", "")
+
+    # Flatten all retrieved contexts into text strings for RAGAS
+    doc_texts   = [c.get("text", "") for c in debug.get("contexts_doc", []) if c.get("text")]
+    graph_texts = [c.get("text", "") for c in debug.get("contexts_graph", []) if c.get("text")]
+    # Neo4j rows as plain text
+    cypher_texts = []
+    for row in debug.get("cypher_rows", []):
+        if isinstance(row, dict):
+            cypher_texts.append(" | ".join(f"{k}: {v}" for k, v in row.items()))
+
+    contexts = doc_texts + graph_texts + cypher_texts
     return {"answer": answer, "contexts": contexts or [""]}
 
 

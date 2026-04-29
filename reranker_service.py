@@ -11,6 +11,7 @@ original retrieval order on any failure.
 import json
 import logging
 import os
+import re
 from typing import List, Dict, Any
 
 import litellm
@@ -37,13 +38,7 @@ class RerankerService:
         """
         Re-rank chunks by relevance to query, return top_k most relevant.
 
-        Args:
-            query: the user's question
-            chunks: retrieved chunks from vector search (may be larger than top_k)
-            top_k: how many to return after reranking
-
-        Returns:
-            Reranked list of up to top_k chunks. Falls back to original order on failure.
+        Falls back to original order on any parse or API failure.
         """
         if not chunks:
             return []
@@ -59,9 +54,9 @@ class RerankerService:
             f"Query: {query}\n\n"
             f"Rank these {len(chunks)} passages by relevance to the query. "
             f"Return ONLY a JSON array of integers (0-based indices) ordered most to least relevant. "
-            f"Include all {len(chunks)} indices. No prose.\n\n"
+            f"Include all {len(chunks)} indices. Example: [2,0,1]. No prose, no markdown.\n\n"
             f"Passages:\n{candidates_text}\n\n"
-            f"Ranked indices:"
+            f"Ranked indices (JSON array only):"
         )
 
         try:
@@ -72,18 +67,25 @@ class RerankerService:
                 temperature=0,
                 max_tokens=512,
             )
-            raw = resp.choices[0].message.content.strip()
-            raw = _strip_fence(raw)
-            # Extract the first valid JSON array of integers, ignoring any preamble/thinking
-            import re as _re
-            m = _re.search(r'\[\s*\d[\d,\s]*\]', raw, _re.DOTALL)
-            raw = m.group(0) if m else raw
-            # Collapse whitespace inside array so json.loads handles multiline arrays
-            raw = _re.sub(r'\s+', ' ', raw)
-            indices = json.loads(raw)
-
-            if not isinstance(indices, list):
-                raise ValueError("not a list")
+            raw = resp.choices[0].message.content or ""
+            indices = _extract_int_array(raw)
+            if indices is None:
+                # One retry with a stricter prompt
+                retry_prompt = (
+                    f"Output ONLY a valid JSON integer array, nothing else. "
+                    f"Example for 3 items: [2,0,1]\n\n"
+                    f"Rank these {len(chunks)} passages (0-based indices) by relevance to: {query[:200]}"
+                )
+                resp2 = litellm.completion(
+                    model=_MODEL,
+                    messages=[{"role": "user", "content": retry_prompt}],
+                    temperature=0,
+                    max_tokens=256,
+                )
+                raw2 = resp2.choices[0].message.content or ""
+                indices = _extract_int_array(raw2)
+                if indices is None:
+                    raise ValueError(f"reranker: could not parse int array from: {raw[:120]!r}")
 
             seen = set()
             reranked = []
@@ -92,22 +94,50 @@ class RerankerService:
                     reranked.append(chunks[idx])
                     seen.add(idx)
 
-            # Safety: append anything the model omitted
+            # Append anything the model omitted to preserve completeness
             for i, chunk in enumerate(chunks):
                 if i not in seen:
                     reranked.append(chunk)
 
-            logger.debug(f"Reranker: pool={len(chunks)} → top={top_k}, new_order={indices[:top_k]}")
+            logger.debug("Reranker: pool=%d → top=%d, new_order=%s", len(chunks), top_k, indices[:top_k])
             return reranked[:top_k]
 
         except Exception as e:
-            logger.warning(f"Reranker failed, using retrieval order: {e}")
+            logger.warning("Reranker failed, using retrieval order: %s", e)
             return chunks[:top_k]
 
 
+def _extract_int_array(text: str):
+    """
+    Extract the first JSON integer array from text, tolerating:
+    - markdown code fences (```json ... ```)
+    - surrounding prose
+    - multiline whitespace inside the array
+
+    Returns a list[int] or None if nothing valid found.
+    """
+    # Strip markdown fences first
+    text = _strip_fence(text)
+    # Find the outermost [...] bracket span (greedy — captures the whole array)
+    m = re.search(r'\[([^\[\]]*)\]', text, re.DOTALL)
+    if not m:
+        return None
+    inner = re.sub(r'\s+', ' ', m.group(0)).strip()
+    try:
+        parsed = json.loads(inner)
+        if isinstance(parsed, list) and all(isinstance(x, int) for x in parsed):
+            return parsed
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return None
+
+
 def _strip_fence(text: str) -> str:
+    """Remove the outermost markdown code fence if present."""
+    text = text.strip()
     if "```" in text:
         parts = text.split("```")
+        # parts[1] is the content between the first pair of fences
         inner = parts[1] if len(parts) > 1 else text
         return inner.lstrip("json").strip()
     return text

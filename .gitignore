@@ -19,3 +19,11 @@ tmp/
 # Benchmark / smoke-test scripts (may contain local credentials)
 benchmark_modes.py
 smoke_test_pageindex.py
+
+# Generated data — not source code
+logs/
+eval/multihop_cache/
+eval/results/
+eval/.DS_Store
+.DS_Store
+app
