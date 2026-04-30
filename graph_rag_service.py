@@ -654,7 +654,7 @@ class GraphRAGService:
                 depth            = self.config.get("graph_reasoning_depth", 2)
                 benchmark_corpus = self.config.get("benchmark_corpus_tag", "")
                 rows = neo4j_service.traverse_neighbors(
-                    seed_names[:5], depth=depth, limit=top_k * 3,
+                    seed_names[:10], depth=depth, limit=max(top_k * 5, 50),
                     benchmark_corpus=benchmark_corpus,
                 )
 

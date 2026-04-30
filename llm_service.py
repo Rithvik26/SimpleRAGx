@@ -270,7 +270,7 @@ ANSWER:"""
         document_text = ""
         if document_contexts:
             doc_sections = []
-            for ctx in document_contexts[:3]:
+            for ctx in document_contexts[:8]:
                 filename = _clean_source_name(ctx['metadata'])
                 doc_sections.append(f"[Source: {filename}]\n{ctx['text']}")
             document_text = "\n\n".join(doc_sections)
@@ -278,7 +278,7 @@ ANSWER:"""
         entities_text = ""
         if entity_contexts:
             entity_list = []
-            for ctx in entity_contexts[:5]:
+            for ctx in entity_contexts[:10]:
                 name = ctx['metadata'].get('entity_name', 'Unknown')
                 etype = ctx['metadata'].get('entity_type', 'Unknown')
                 desc = ctx['metadata'].get('description', '')
@@ -294,7 +294,7 @@ ANSWER:"""
         relationships_text = ""
         if relationship_contexts:
             rel_list = []
-            for ctx in relationship_contexts[:5]:
+            for ctx in relationship_contexts[:10]:
                 source = _clean_source_name(ctx['metadata'])
                 target = ctx['metadata'].get('target', 'Unknown')
                 rel = ctx['metadata'].get('relationship', 'related_to')
@@ -320,14 +320,30 @@ QUESTION: {query}
         if relationships_text:
             prompt += f"RELATIONSHIPS FROM KNOWLEDGE GRAPH:\n{relationships_text}\n\n"
 
-        prompt += """INSTRUCTIONS:
-1. CRITICAL: Answer ONLY with information explicitly provided in the context above
-2. If the requested information is NOT present, state this in ONE sentence - do NOT speculate
-3. Start with the most direct, factual answer possible
-4. Keep responses concise - answer in 1-3 sentences for simple facts
-5. Use inline citations: (Source: filename.pdf)
-6. Do NOT use phrases like "we can infer", "this suggests", "typically", or "likely"
-7. If showing relationship chains, use format: Person -> works_at -> Company
+        # Detect question type for targeted prompt instructions
+        _yn_starters = ("did ", "does ", "is ", "was ", "were ", "has ", "have ", "do ", "are ")
+        _q_lower = query.strip().lower()
+        _is_yn = _q_lower.startswith(_yn_starters)
+        _is_comparison = _is_yn and any(
+            kw in _q_lower for kw in ("agree", "align", "consistent", "same as", "match", "both claim", "also claim")
+        )
+
+        prompt += "INSTRUCTIONS:\n"
+        if _is_comparison:
+            prompt += (
+                "1. This is an agreement/alignment question. If the named sources appear anywhere in "
+                "the retrieved context above, synthesize their claims and state whether they agree. "
+                "Do NOT say 'documents do not contain' if relevant context is shown above — trust the evidence.\n"
+            )
+        elif _is_yn:
+            prompt += "1. This is a Yes/No question. Start your answer with 'Yes' or 'No' then explain briefly.\n"
+        else:
+            prompt += "1. State the answer directly and concisely. If context strongly implies an entity name, state it.\n"
+        prompt += """2. Answer from the context above. Do not speculate beyond what is stated.
+3. Once you have stated your answer, stop — do not add disclaimers about what the documents lack.
+4. Only say "Insufficient information" if the context contains nothing relevant at all.
+5. Use inline citations: (Source: filename)
+6. If showing relationship chains, use format: Entity -> relationship -> Entity
 
 ANSWER:"""
 
@@ -352,6 +368,7 @@ ANSWER:"""
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
                 max_tokens=max_tokens,
+                extra_body={"generationConfig": {"thinkingConfig": {"thinkingBudget": 0}}},
             )
 
             if progress_tracker:
@@ -426,6 +443,7 @@ ANSWER:"""
                 messages=[{"role": "user", "content": "Respond with: Gemini connection test successful."}],
                 temperature=0,
                 max_tokens=20,
+                extra_body={"generationConfig": {"thinkingConfig": {"thinkingBudget": 0}}},
             )
             content = resp.choices[0].message.content or ""
             status["service_available"] = True

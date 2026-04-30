@@ -33,7 +33,27 @@ except (ImportError, ModuleNotFoundError) as _e:
 from neo4j_service import Neo4jService
 from pageindex_service import PageIndexService
 
+import re as _re
+
 logger = logging.getLogger(__name__)
+
+# Patterns to extract named publisher/source references from comparison questions.
+# e.g. "'Sporting News' article", "article from The Verge", "the TechCrunch coverage"
+_SOURCE_PAT_QUOTED  = _re.compile(r"'([^']{3,40})'")
+_SOURCE_PAT_FROM    = _re.compile(r"\bfrom\s+((?:[A-Z][A-Za-z0-9.]+)(?:\s+[A-Z][A-Za-z0-9.]+)*)\b")
+_SOURCE_PAT_THE_COV = _re.compile(r"\bthe\s+([A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+)*)\s+(?:coverage|article|report|piece)\b")
+
+def _extract_named_sources(question: str) -> list:
+    """Return distinct source/publisher names mentioned in a comparison question."""
+    seen, out = set(), []
+    for pat in (_SOURCE_PAT_QUOTED, _SOURCE_PAT_FROM, _SOURCE_PAT_THE_COV):
+        for m in pat.finditer(question):
+            s = m.group(1).strip().rstrip(".,?")
+            if s and s not in seen:
+                seen.add(s)
+                out.append(s)
+    return out
+
 
 class EnhancedSimpleRAG:
     """SimpleRAGx with both Normal and Graph RAG capabilities."""
@@ -368,12 +388,15 @@ class EnhancedSimpleRAG:
 
             # 1b. Skip if already indexed (content hash check)
             import hashlib as _hl
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
             file_hash = _hl.sha256(Path(file_path).read_bytes()).hexdigest()[:16]
             if self.vector_db_service:
                 try:
                     hits, _ = self.vector_db_service.client.scroll(
                         collection_name=self.config["collection_name"],
-                        scroll_filter={"must": [{"key": "metadata.doc_hash", "match": {"value": file_hash}}]},
+                        scroll_filter=Filter(must=[
+                            FieldCondition(key="metadata.doc_hash", match=MatchValue(value=file_hash))
+                        ]),
                         limit=1,
                         with_payload=False,
                         with_vectors=False,
@@ -928,45 +951,53 @@ class EnhancedSimpleRAG:
     def _query_graph_mode(self, question: str, progress_tracker: Optional[ProgressTracker] = None) -> str:
         """Query using graph RAG mode with hybrid search."""
         try:
-            # Step 1: Generate query embedding
+            # Step 1: Query planning (HyDE + decomposition) — same as normal mode
             if progress_tracker:
-                progress_tracker.update(10, 100, status="embedding", 
-                                      message="Generating query embedding")
-            
-            query_embedding = self.embedding_service.get_embedding(question)
-            
+                progress_tracker.update(10, 100, status="embedding",
+                                      message="Planning query and generating embeddings")
+
+            if self.query_planner:
+                plan = self.query_planner.plan(question)
+            else:
+                plan = {"strategy": "simple", "sub_queries": [question], "hyde_docs": []}
+
             # Step 2: Search both collections
             if progress_tracker:
-                progress_tracker.update(20, 100, status="searching", 
+                progress_tracker.update(20, 100, status="searching",
                                       message="Searching documents and knowledge graph")
-            
+
             top_k = self.config["top_k"]
-            retrieval_k = top_k * 2 if self.reranker else top_k // 2
+            retrieval_k = top_k * 3 if self.reranker else top_k
 
-            # Search document chunks
-            doc_contexts = self.vector_db_service.search_similar(
-                query_embedding,
-                top_k=retrieval_k,
-                collection_name=self.config["collection_name"]
-            )
+            # Search document chunks — embed each sub-query+HyDE, RRF-merge
+            result_lists = []
+            hyde_docs = plan.get("hyde_docs", [])
+            for i, q in enumerate(plan["sub_queries"]):
+                hyde = hyde_docs[i] if i < len(hyde_docs) and hyde_docs[i] else None
+                emb = self.embedding_service.get_embedding(hyde if hyde else q)
+                result_lists.append(self.vector_db_service.search_similar(
+                    emb, top_k=retrieval_k, collection_name=self.config["collection_name"]
+                ))
 
-            # Search graph elements (Neo4j traversal when available)
+            doc_contexts = rrf_merge(result_lists) if len(result_lists) > 1 else (result_lists[0] if result_lists else [])
+
+            # Search graph elements (Neo4j traversal when available) — full top_k budget
             if not self.neo4j_service:
                 logger.warning(
                     "graph mode: Neo4j not configured — topology traversal disabled. "
-                    "Configure NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD for full graph mode."
+                    "Configure NEO4J_URI/NEO4J_USER/NEA4J_PASSWORD for full graph mode."
                 )
             graph_contexts = self.graph_rag_service.search_graph(
                 question,
-                top_k=top_k // 2,
+                top_k=top_k,
                 neo4j_service=self.neo4j_service,
             )
 
-            # Rerank doc_contexts before combining with graph contexts
-            if self.reranker and len(doc_contexts) > top_k // 2:
+            # Rerank doc_contexts down to top_k (not top_k//2)
+            if self.reranker and len(doc_contexts) > top_k:
                 if progress_tracker:
                     progress_tracker.update(40, 100, status="reranking", message="Reranking document results")
-                doc_contexts = self.reranker.rerank(question, doc_contexts, top_k // 2)
+                doc_contexts = self.reranker.rerank(question, doc_contexts, top_k)
 
             all_contexts = doc_contexts + graph_contexts
 

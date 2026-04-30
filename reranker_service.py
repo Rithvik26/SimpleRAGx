@@ -66,6 +66,7 @@ class RerankerService:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
                 max_tokens=512,
+                extra_body={"generationConfig": {"thinkingConfig": {"thinkingBudget": 0}}},
             )
             raw = resp.choices[0].message.content or ""
             indices = _extract_int_array(raw)
@@ -81,6 +82,7 @@ class RerankerService:
                     messages=[{"role": "user", "content": retry_prompt}],
                     temperature=0,
                     max_tokens=256,
+                    extra_body={"generationConfig": {"thinkingConfig": {"thinkingBudget": 0}}},
                 )
                 raw2 = resp2.choices[0].message.content or ""
                 indices = _extract_int_array(raw2)

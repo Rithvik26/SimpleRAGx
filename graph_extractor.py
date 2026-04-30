@@ -46,9 +46,16 @@ _LABEL_TO_TYPE = {
     "event":            "EVENT",
 }
 
-# ── Singleton GLiNER model (loaded once, reused across all chunks) ────────────
+# ── GLiNER backend — local (default) or Modal (set MODAL_GLINER=1) ───────────
 _gliner_model = None
-_gliner_lock = threading.Lock()  # PyTorch inter-op thread pool is shared; serialize inference
+_gliner_lock = threading.Lock()  # local only: PyTorch inter-op thread pool is shared
+
+# Modal service handle — resolved once at first use
+_modal_gliner: object = None
+_modal_gliner_resolved = False
+
+_USE_MODAL = os.environ.get("MODAL_GLINER", "").strip() == "1"
+
 
 def _get_gliner_model():
     global _gliner_model
@@ -59,6 +66,43 @@ def _get_gliner_model():
         _gliner_model = GLiNER.from_pretrained("urchade/gliner_small-v2.1")
         logger.info(f"GLiNER loaded in {round(time.time() - t0, 1)}s")
     return _gliner_model
+
+
+def _get_modal_gliner():
+    """Resolve the Modal GLiNER service handle (once per process)."""
+    global _modal_gliner, _modal_gliner_resolved
+    if not _modal_gliner_resolved:
+        try:
+            import modal as _modal
+            _modal_gliner = _modal.Cls.from_name("simplerag-gliner", "GLiNERService")
+            logger.info("Modal GLiNER service resolved — using cloud inference")
+        except Exception as e:
+            logger.warning("Modal GLiNER unavailable, falling back to local: %s", e)
+            _modal_gliner = None
+        _modal_gliner_resolved = True
+    return _modal_gliner
+
+
+def _gliner_batch(texts: list) -> list:
+    """
+    Run GLiNER on a list of texts.
+
+    Uses Modal (parallel containers, no lock) when MODAL_GLINER=1 and the
+    service is deployed. Falls back to local batch inference automatically.
+    Returns list[list[span_dict]] — one inner list per input text.
+    """
+    if _USE_MODAL:
+        svc = _get_modal_gliner()
+        if svc is not None:
+            try:
+                return svc().batch_ner.remote(texts, _GLINER_LABELS, threshold=0.5)
+            except Exception as e:
+                logger.warning("Modal call failed, falling back to local: %s", e)
+
+    # Local fallback — one lock acquisition, one forward pass
+    model = _get_gliner_model()
+    with _gliner_lock:
+        return model.inference(texts, labels=_GLINER_LABELS, threshold=0.5, batch_size=16)
 
 
 # ── Relationship extraction via cheap LLM ────────────────────────────────────
@@ -78,11 +122,14 @@ def _extract_relationships_llm(
 
     entity_names = [e["name"] for e in entities]
 
+    # Cap entity list to avoid overwhelming the LLM; top 20 is sufficient
+    entity_names = entity_names[:20]
+
     prompt = (
         "Extract relationships between the listed entities from the text.\n"
         "Output ONLY a valid JSON array. No explanation, no markdown fences.\n\n"
         f"ENTITIES: {json.dumps(entity_names)}\n\n"
-        f"TEXT:\n{text[:1500]}\n\n"
+        f"TEXT:\n{text[:3000]}\n\n"
         "Each item must be: "
         "{\"source\": \"EntityA\", \"relationship\": \"short_verb\", "
         "\"target\": \"EntityB\", \"description\": \"one sentence\"}\n"
@@ -100,7 +147,8 @@ def _extract_relationships_llm(
             model="gemini/gemini-2.5-flash",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
-            max_tokens=1024,
+            max_tokens=2048,
+            extra_body={"generationConfig": {"thinkingConfig": {"thinkingBudget": 0}}},
         )
         raw = resp.choices[0].message.content.strip()
         # Strip markdown fences if present
@@ -252,46 +300,79 @@ class GraphExtractor:
     def extract_from_multiple_chunks(
         self, chunks: List[str], progress_callback=None, max_workers: int = 8
     ) -> Dict[str, Any]:
-        """Extract from all chunks in parallel (GLiNER local + LLM concurrent)."""
+        """Extract from all chunks with batched LLM call.
+
+        GLiNER runs sequentially (global lock makes parallelism pointless).
+        All chunks' entities are merged, then ONE LLM relationship call covers
+        the whole doc — reduces LLM calls from N_chunks to 1 per doc.
+        """
         total = len(chunks)
-        logger.info(f"Starting hybrid extraction from {total} chunks ({max_workers} workers)")
+        logger.info(f"Starting batched extraction from {total} chunks")
         t_start = time.time()
 
-        results: List[Optional[Dict]] = [None] * total
-        completed = 0
-
-        def _process(args):
-            i, chunk = args
-            chunk_id = f"chunk_{i}"
-            return i, self.extract_entities_and_relationships(chunk, chunk_id)
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(_process, (i, c)): i for i, c in enumerate(chunks)}
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    i, result = future.result()
-                    results[i] = result
-                except Exception as e:
-                    logger.error(f"Error on chunk {futures[future]}: {e}")
-                completed += 1
-                if progress_callback:
-                    progress_callback(completed, total, f"Chunk {completed}/{total}")
+        # Stage 1: GLiNER batch inference — one forward pass for all chunks
+        valid_indices = [i for i, c in enumerate(chunks) if c and c.strip()]
+        cleaned_texts = [re.sub(r"\s+", " ", chunks[i].strip()) for i in valid_indices]
 
         all_entities: List[Dict] = []
-        all_relationships: List[Dict] = []
-        for r in results:
-            if r:
-                all_entities.extend(r.get("entities", []))
-                all_relationships.extend(r.get("relationships", []))
+        seen_ids: set = set()
+        if cleaned_texts:
+            try:
+                batch_results = _gliner_batch(cleaned_texts)
+            except Exception as e:
+                logger.error(f"GLiNER batch failed: {e}")
+                batch_results = [[] for _ in cleaned_texts]
+
+            for result_idx, (chunk_idx, raw) in enumerate(zip(valid_indices, batch_results)):
+                chunk = chunks[chunk_idx]
+                cleaned = cleaned_texts[result_idx]
+                for span in raw:
+                    name = span["text"].strip()
+                    if not name:
+                        continue
+                    etype = _LABEL_TO_TYPE.get(span["label"], "CONCEPT")
+                    eid = canonical_id(name, etype)
+                    if eid in seen_ids:
+                        continue
+                    seen_ids.add(eid)
+                    all_entities.append({
+                        "id":            eid,
+                        "name":          name,
+                        "type":          etype,
+                        "description":   _entity_description(name, cleaned),
+                        "source_chunks": [f"chunk_{chunk_idx}"],
+                        "source_texts":  [chunk[:200]],
+                        "merged_from":   1,
+                        "aliases":       [name],
+                    })
+
+        if progress_callback:
+            progress_callback(total, total, f"GLiNER batch done ({total} chunks)")
+
+        all_entities = all_entities[: self.max_entities_per_chunk * total]
+
+        # Stage 2: ONE batched LLM call for relationships across all chunks
+        combined_text = "\n\n".join(
+            c.strip()[:self.max_chunk_length] for c in chunks if c.strip()
+        )[:4500]  # Gemini Flash has 1M context; 4500 chars is plenty for news articles
+
+        relationships: List[Dict] = []
+        if len(all_entities) >= 2:
+            try:
+                t0 = time.time()
+                relationships = _extract_relationships_llm(combined_text, all_entities, self.api_key)
+                logger.debug(f"Batched relationships: {len(relationships)} in {round(time.time()-t0,2)}s")
+            except Exception as e:
+                logger.error(f"Batched relationship extraction failed: {e}")
 
         elapsed = round(time.time() - t_start, 1)
         logger.info(
             f"Extraction complete: {len(all_entities)} entities, "
-            f"{len(all_relationships)} relationships from {total} chunks in {elapsed}s"
+            f"{len(relationships)} relationships from {total} chunks in {elapsed}s"
         )
         return {
             "entities":         all_entities,
-            "relationships":    all_relationships,
+            "relationships":    relationships,
             "chunks_processed": total,
         }
 

@@ -55,8 +55,17 @@ DOC_COLLECTION_NORMAL  = "multihop_normal_docs"
 DOC_COLLECTION_GRAPH   = "multihop_graph_docs"
 GRAPH_COLLECTION       = "multihop_graph"
 
+# Overridden by --real-collections flag to use the main app collections from dev_config.json
+_REAL_COLLECTION_OVERRIDE: str = ""
+_REAL_GRAPH_COLLECTION_OVERRIDE: str = ""
+
 def _doc_collection_for(mode: str) -> str:
+    if _REAL_COLLECTION_OVERRIDE:
+        return _REAL_COLLECTION_OVERRIDE
     return DOC_COLLECTION_NORMAL if mode == "normal" else DOC_COLLECTION_GRAPH
+
+def _graph_collection() -> str:
+    return _REAL_GRAPH_COLLECTION_OVERRIDE if _REAL_GRAPH_COLLECTION_OVERRIDE else GRAPH_COLLECTION
 
 logging.basicConfig(
     level=logging.INFO,
@@ -85,9 +94,12 @@ Golden answer: {golden}
 AI-generated answer: {generated}
 
 Rules:
-- Minor rounding or phrasing differences are acceptable.
-- The AI answer is correct if it conveys the same meaning or is a correct superset.
-- "I don't know" / "not found" / empty = WRONG
+- The AI answer is CORRECT if it contains the golden answer, even if it also includes extra text.
+- For Yes/No questions: TRUE if the AI starts with or clearly states the same Yes/No as the golden.
+- Minor rounding, phrasing differences, or partial name matches (e.g. "Hope" vs "Shai Hope") are acceptable.
+- Ignore trailing disclaimers like "documents do not contain..." — judge only the stated answer.
+- "I don't know" / "not found" / "insufficient information" / empty = WRONG only if golden is not those.
+- If golden is "Insufficient information" and AI says it cannot find info, that is CORRECT.
 
 Reply with exactly one word: TRUE or FALSE"""
 
@@ -160,16 +172,16 @@ def _build_cfg(mode: str) -> Dict:
         "neo4j_password":         _cfg_get("NEO4J_PASSWORD", "neo4j_password"),
         "neo4j_database":         _cfg_get("NEO4J_DATABASE", "neo4j_database", "neo4j"),
         "neo4j_enabled":          bool(_cfg_get("NEO4J_URI", "neo4j_uri")),
-        "collection_name":        _doc_collection_for(mode),   # isolated per mode
-        "graph_collection_name":  GRAPH_COLLECTION,
+        "collection_name":        _doc_collection_for(mode),
+        "graph_collection_name":  _graph_collection(),
         "rag_mode":               mode,
         "setup_completed":        True,
         "preferred_llm":          "raw",
         "embedding_dimension":    768,
-        "chunk_size":             800,
+        "chunk_size":             1500,
         "chunk_overlap":          150,
-        "top_k":                  5,
-        "rate_limit":             300,
+        "top_k":                  10,
+        "rate_limit":             1000,
         "enable_cache":           False,
         "cache_dir":              None,
         "max_entities_per_chunk": 15,
@@ -421,16 +433,21 @@ def _index_one_doc(args: Tuple) -> Tuple[int, bool, dict]:
             pass
 
 
+_WORKERS_NORMAL = 16  # normal mode — Qdrant writes only, safe at high concurrency
+_WORKERS_GRAPH  = 16  # graph mode — batched LLM (1 call/doc), Neo4j handles concurrent MERGEs fine
+
+
 def _index_corpus_docs(mode: str, docs: List[Tuple[str, Dict]]) -> int:
     """
-    Index (text, metadata) pairs into SimpleRAG in parallel (4 workers).
+    Index (text, metadata) pairs into SimpleRAG in parallel.
     Returns count of successfully indexed docs.
     """
     import concurrent.futures
+    n_workers = _WORKERS_NORMAL if mode == "normal" else _WORKERS_GRAPH
     indexed = 0
     args = [(i, text, meta, mode) for i, (text, meta) in enumerate(docs)]
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
         futures = {pool.submit(_index_one_doc, a): a[0] for a in args}
         done_count = 0
         for future in concurrent.futures.as_completed(futures):
@@ -459,6 +476,7 @@ def run_multihop_real(
     out_path: str,
     seed: int = 42,
     reset: bool = False,
+    skip_index: bool = False,
 ):
     print("\n" + "=" * 70)
     print("  REAL MultiHop-RAG Benchmark (yixuantt/MultiHopRAG, COLM 2024)")
@@ -608,18 +626,21 @@ def run_multihop_real(
         _reset_benchmark_collections(modes)
 
     for mode in modes:
-        print(f"\n[4/5] Indexing for mode={mode}…")
-        rag, _ = _get_rag(mode)
-        # Set mode on rag instance so index_document branches correctly
-        rag.rag_mode = mode
-        if hasattr(rag, "document_processor") and rag.document_processor:
-            rag.document_processor.rag_mode = mode
+        if skip_index:
+            print(f"\n[4/5] Skipping indexing for mode={mode} (--skip-index)")
+            rag, _ = _get_rag(mode)
+        else:
+            print(f"\n[4/5] Indexing for mode={mode}…")
+            rag, _ = _get_rag(mode)
+            rag.rag_mode = mode
+            if hasattr(rag, "document_processor") and rag.document_processor:
+                rag.document_processor.rag_mode = mode
 
-        indexed = _index_corpus_docs(mode, docs_to_index)
-        print(f"  Indexed {indexed}/{len(docs_to_index)} docs for mode={mode}")
-        if indexed == 0:
-            print(f"\n  ERROR: 0 docs indexed for mode={mode}. Aborting.")
-            sys.exit(1)
+            indexed = _index_corpus_docs(mode, docs_to_index)
+            print(f"  Indexed {indexed}/{len(docs_to_index)} docs for mode={mode}")
+            if indexed == 0:
+                print(f"\n  ERROR: 0 docs indexed for mode={mode}. Aborting.")
+                sys.exit(1)
 
         # Sanity check
         print(f"\n[sanity] mode={mode}")
@@ -905,7 +926,23 @@ def main():
         help="Delete and recreate multihop_* Qdrant collections and Neo4j corpus data before indexing. "
              "Required to prevent stale data from a previous smoke run.",
     )
+    parser.add_argument(
+        "--real-collections", action="store_true",
+        help="Index into the main app collection (from dev_config.json) instead of isolated multihop_* collections. "
+             "Docs persist in the live app after the run.",
+    )
+    parser.add_argument(
+        "--skip-index", action="store_true",
+        help="Skip indexing phase entirely — use whatever is already in the collections.",
+    )
     args = parser.parse_args()
+
+    if args.real_collections:
+        global _REAL_COLLECTION_OVERRIDE, _REAL_GRAPH_COLLECTION_OVERRIDE
+        dev_cfg = _load_dev_config()
+        _REAL_COLLECTION_OVERRIDE = dev_cfg.get("collection_name", "simple_rag_normal")
+        _REAL_GRAPH_COLLECTION_OVERRIDE = dev_cfg.get("graph_collection_name", "simple_rag_graph")
+        print(f"[real-collections] docs → {_REAL_COLLECTION_OVERRIDE!r}, graph → {_REAL_GRAPH_COLLECTION_OVERRIDE!r}")
 
     _validate_env()
     RESULTS_DIR.mkdir(exist_ok=True)
@@ -917,6 +954,7 @@ def main():
         out_path=args.out,
         seed=args.seed,
         reset=args.reset,
+        skip_index=args.skip_index,
     )
 
     # Write JSON

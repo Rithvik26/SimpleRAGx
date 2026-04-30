@@ -132,6 +132,7 @@ class QueryPlanner:
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
             max_tokens=max_tokens,
+            extra_body={"generationConfig": {"thinkingConfig": {"thinkingBudget": 0}}},
         )
         return (resp.choices[0].message.content or "").strip()
 
