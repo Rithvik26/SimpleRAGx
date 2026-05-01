@@ -1,0 +1,12 @@
+{
+  "normal": {
+    "metrics": {
+      "faithfulness": 0.0357,
+      "answer_relevancy": 0.0,
+      "context_precision": 0.0,
+      "context_recall": 0.0
+    },
+    "n_questions": 14,
+    "timestamp": "2026-04-26T19:18:14Z"
+  }
+}

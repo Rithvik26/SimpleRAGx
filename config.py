@@ -59,7 +59,9 @@ DEFAULT_CONFIG = {
     "active_domain": "vc_financial",
     # Set False to skip LLM metadata extraction at ingest (faster, no domain filtering)
     "enable_metadata_extraction": True,
-    # Reranker: re-orders retrieval results using Gemini (biggest single quality win)
+    # Reranker: Voyage AI cross-encoder rerank-2 — biggest single retrieval quality win
+    # Requires VOYAGE_API_KEY. Set to False to disable without removing the key.
+    "voyage_api_key": "",
     "enable_reranking": True,
     # Query planner: HyDE + decomposition for multi-hop queries
     "enable_query_planning": True,

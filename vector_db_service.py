@@ -253,6 +253,7 @@ class VectorDBService:
             
             if collection_name in existing_collections:
                 logger.info(f"Successfully created collection: {collection_name}")
+                self.ensure_payload_indexes(collection_name)
                 return True
             else:
                 raise RuntimeError(f"Collection creation verification failed for: {collection_name}")
@@ -262,6 +263,28 @@ class VectorDBService:
             logger.error(error_msg)
             raise RuntimeError(error_msg)
     
+    def ensure_payload_indexes(self, collection_name: str = None) -> None:
+        """Create keyword payload indexes required for metadata filtering.
+
+        Qdrant Cloud requires indexed fields for any filtered search. This must
+        be called once after a collection is created (idempotent — safe to call
+        on existing collections; Qdrant ignores duplicate index creation).
+        """
+        if not self.is_available():
+            return
+        col = collection_name or self.collection_name
+        for field in ("metadata.source", "metadata.published_at", "metadata.doc_hash"):
+            try:
+                self.client.create_payload_index(
+                    collection_name=col,
+                    field_name=field,
+                    field_schema=models.PayloadSchemaType.KEYWORD,
+                )
+                logger.debug("Payload index ensured: %s.%s", col, field)
+            except Exception as e:
+                # Index already exists or other non-fatal error
+                logger.debug("Payload index skipped (%s.%s): %s", col, field, e)
+
     def get_collection_info(self, collection_name: str = None) -> Dict[str, Any]:
         """Get detailed information about a collection."""
         if not self.is_available():
@@ -554,3 +577,98 @@ class VectorDBService:
         except Exception as e:
             logger.error(f"Error listing collections: {str(e)}")
             raise
+
+    # ── Hybrid (dense + sparse BM25) ──────────────────────────────────────────
+
+    def ensure_hybrid_collection_exists(self, collection_name: str) -> bool:
+        """Create a collection with named dense + sparse vectors for hybrid search.
+
+        Uses Qdrant named-vector collections:
+          - 'dense'  : cosine float vector (same dim as dense-only collections)
+          - 'sparse' : BM25 sparse vector with IDF modifier
+        Returns True if created, False if already existed.
+        """
+        if not self.is_available():
+            raise RuntimeError(f"Vector database not available. Last error: {self.last_error}")
+
+        existing = [c.name for c in self.client.get_collections().collections]
+        if collection_name in existing:
+            logger.info(f"Hybrid collection already exists: {collection_name}")
+            return False
+
+        from qdrant_client.models import (
+            VectorParams, SparseVectorParams, Distance, Modifier
+        )
+        logger.info(f"Creating hybrid collection: {collection_name}")
+        self.client.create_collection(
+            collection_name=collection_name,
+            vectors_config={"dense": VectorParams(size=self.embedding_dimension, distance=Distance.COSINE)},
+            sparse_vectors_config={"sparse": SparseVectorParams(modifier=Modifier.IDF)},
+        )
+        logger.info(f"Hybrid collection created: {collection_name}")
+        return True
+
+    def insert_hybrid_documents(
+        self,
+        documents: List[Dict[str, Any]],
+        dense_embeddings: List[List[float]],
+        sparse_vectors,
+        collection_name: str,
+        batch_size: int = 64,
+    ):
+        """Insert documents with both dense and sparse (BM25) vectors."""
+        if not self.is_available():
+            raise RuntimeError(f"Vector database not available. Last error: {self.last_error}")
+
+        from qdrant_client.models import PointStruct
+
+        points = []
+        for i, (doc, dense, sparse) in enumerate(zip(documents, dense_embeddings, sparse_vectors)):
+            point_id = abs(hash(doc.get("id", "") or str(i))) % (2 ** 63)
+            points.append(PointStruct(
+                id=point_id,
+                vector={"dense": dense, "sparse": sparse},
+                payload={"text": doc.get("text", ""), "metadata": doc.get("metadata", {})},
+            ))
+
+        for start in range(0, len(points), batch_size):
+            batch = points[start:start + batch_size]
+            self.client.upsert(collection_name=collection_name, points=batch)
+            logger.info(f"Hybrid upsert: {start + len(batch)}/{len(points)} points → {collection_name}")
+
+    def search_hybrid(
+        self,
+        dense_query: List[float],
+        sparse_query,
+        top_k: int,
+        collection_name: str,
+    ) -> List[Dict[str, Any]]:
+        """Hybrid search: dense + BM25 sparse, fused with Qdrant RRF."""
+        if not self.is_available():
+            return []
+
+        from qdrant_client.models import Prefetch, FusionQuery, Fusion
+
+        try:
+            results = self.client.query_points(
+                collection_name=collection_name,
+                prefetch=[
+                    Prefetch(query=dense_query, using="dense", limit=top_k * 3),
+                    Prefetch(query=sparse_query, using="sparse", limit=top_k * 3),
+                ],
+                query=FusionQuery(fusion=Fusion.RRF),
+                limit=top_k,
+                with_payload=True,
+            ).points
+
+            return [
+                {
+                    "text": p.payload.get("text", ""),
+                    "metadata": p.payload.get("metadata", {}),
+                    "score": float(p.score),
+                }
+                for p in results
+            ]
+        except Exception as e:
+            logger.error(f"Hybrid search failed for {collection_name}: {e}")
+            return []

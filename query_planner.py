@@ -27,12 +27,34 @@ import json
 import logging
 import os
 import re
+import threading
 from typing import List, Dict, Any
 
 import litellm
 
 logger = logging.getLogger(__name__)
 _MODEL = "gemini/gemini-2.5-flash"
+
+# HyDE text cache: keyed on sha256(query + model). Persisted to disk so the same
+# question always produces the same hypothetical doc across eval runs.
+_HYDE_CACHE_PATH = os.path.join(os.path.expanduser("~"), ".simpleragx", "hyde_cache.json")
+_hyde_cache: dict = {}
+_hyde_cache_lock = threading.Lock()
+
+def _load_hyde_cache():
+    global _hyde_cache
+    try:
+        with open(_HYDE_CACHE_PATH) as f:
+            _hyde_cache = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        _hyde_cache = {}
+
+def _save_hyde_cache():
+    os.makedirs(os.path.dirname(_HYDE_CACHE_PATH), exist_ok=True)
+    with open(_HYDE_CACHE_PATH, "w") as f:
+        json.dump(_hyde_cache, f)
+
+_load_hyde_cache()
 
 # Signals that suggest multi-hop reasoning is needed
 _MULTI_HOP_SIGNALS = [
@@ -111,6 +133,11 @@ class QueryPlanner:
         """
         hyde_docs = []
         for q in queries:
+            cache_key = hashlib.sha256(f"{q}|{_MODEL}".encode()).hexdigest()
+            with _hyde_cache_lock:
+                if cache_key in _hyde_cache:
+                    hyde_docs.append(_hyde_cache[cache_key])
+                    continue
             prompt = (
                 "Write a short passage (2-4 sentences) that would appear in a source document "
                 "and directly supports the answer to this question. "
@@ -118,8 +145,11 @@ class QueryPlanner:
                 f"Question: {q}\n\nPassage:"
             )
             try:
-                doc = self._call(prompt, max_tokens=180)
-                hyde_docs.append(doc.strip())
+                doc = self._call(prompt, max_tokens=180).strip()
+                with _hyde_cache_lock:
+                    _hyde_cache[cache_key] = doc
+                    _save_hyde_cache()
+                hyde_docs.append(doc)
             except Exception as e:
                 logger.warning("HyDE generation failed: %s", e)
                 hyde_docs.append("")
@@ -130,7 +160,7 @@ class QueryPlanner:
         resp = litellm.completion(
             model=_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
+            temperature=0,
             max_tokens=max_tokens,
             extra_body={"generationConfig": {"thinkingConfig": {"thinkingBudget": 0}}},
         )

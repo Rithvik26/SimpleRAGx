@@ -26,3 +26,5 @@ ddgs>=0.0.1
 # Domain-tuned document parsing
 python-pptx>=0.6.21
 pdfplumber>=0.10.0
+# Reranking — Voyage AI cross-encoder (replaces Gemini LLM-based reranker)
+voyageai>=0.3.7

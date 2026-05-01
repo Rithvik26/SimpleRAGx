@@ -55,6 +55,77 @@ def _extract_named_sources(question: str) -> list:
     return out
 
 
+_COMPARISON_GATE_KW = frozenset({
+    "agree", "align", "consistent", "same as", "match", "both claim",
+    "also claim", "claim that", "report that", "suggest that", "imply that",
+    "indicate that",
+})
+
+# Difference/contrast keywords that also signal a cross-source comparison question
+# but were missed by _is_source_comparison (which only checked alignment keywords).
+_DIFF_KW = frozenset({
+    "different", "differ", "compared to", "compared with", "versus", " vs ",
+    "unlike", "while the", "whereas", "contrast", "indicate a different",
+})
+
+def _is_multi_source_comparison(question: str) -> bool:
+    """True when question names ≥2 distinct publishers AND has difference/contrast signal.
+
+    Catches comparison_query patterns like "does [A] indicate a different strategy
+    compared to [B]?" that _is_source_comparison misses (no alignment keywords).
+    """
+    q = question.lower()
+    if "between" in q:
+        return False
+    if len(_extract_named_sources(question)) < 2:
+        return False
+    return any(kw in q for kw in _DIFF_KW)
+
+def _is_source_comparison(question: str) -> bool:
+    """True only when the question both names a specific publisher AND asks about agreement/alignment.
+
+    Gate prevents source-boosted searches from firing on temporal questions
+    ("After Sporting News reported...", "consistent between X and Y") which name
+    sources but are not single-source claim checks.
+    """
+    q = question.lower()
+    # "consistent between X and Y" is a temporal consistency check, not a source claim check
+    if "between" in q:
+        return False
+    has_comparison = any(kw in q for kw in _COMPARISON_GATE_KW)
+    has_source = bool(
+        _SOURCE_PAT_QUOTED.search(question) or
+        _SOURCE_PAT_FROM.search(question) or
+        _SOURCE_PAT_THE_COV.search(question)
+    )
+    return has_comparison and has_source
+
+
+_SOURCE_BOOST_STOPWORDS = frozenset({
+    "the", "a", "an", "is", "does", "did", "was", "were", "has", "have",
+    "that", "this", "from", "with", "and", "or", "of", "in", "to", "by",
+    "at", "it", "its", "be", "for", "on", "as", "article", "report",
+    "coverage", "piece", "suggest", "claim", "indicate", "imply", "state",
+    "whether", "both", "also", "about", "their", "which", "what", "how",
+})
+
+def _source_boost_query(source: str, question: str) -> str:
+    """Build a focused keyword query: source name + top content words from question.
+
+    Bypasses HyDE/decomposition so the source name is guaranteed to be in the
+    query vector, surfacing chunks that pure semantic search misses.
+    """
+    source_words = frozenset(source.lower().split())
+    words = [w.strip("'\".,?!()") for w in question.split()]
+    keywords = [
+        w for w in words
+        if w.lower() not in _SOURCE_BOOST_STOPWORDS
+        and w.lower() not in source_words
+        and len(w) > 3
+    ][:8]
+    return f"{source} {' '.join(keywords)}"
+
+
 class EnhancedSimpleRAG:
     """SimpleRAGx with both Normal and Graph RAG capabilities."""
     
@@ -90,7 +161,6 @@ class EnhancedSimpleRAG:
         self.metadata_extractor = None
         self.reranker = None
         self.query_planner = None
-
         # Track initialization status
         self.initialization_errors = []
         self.initialization_warnings = []
@@ -198,14 +268,14 @@ class EnhancedSimpleRAG:
         except Exception as e:
             logger.warning(f"Metadata extractor init failed (non-fatal): {e}")
 
-        # 7. Reranker
+        # 7. Reranker (Voyage AI cross-encoder — replaces prior Gemini LLM-based reranker)
         try:
-            gemini_key = self.config.get("gemini_api_key", "")
-            if gemini_key and self.config.get("enable_reranking", True):
-                self.reranker = RerankerService(gemini_key)
-                logger.info(". Reranker initialized (Gemini-based)")
+            voyage_key = self.config.get("voyage_api_key", "") or os.environ.get("VOYAGE_API_KEY", "")
+            if voyage_key and self.config.get("enable_reranking", True):
+                self.reranker = RerankerService(voyage_key)
+                logger.info(". Reranker initialized (Voyage AI rerank-2)")
             else:
-                logger.info("Reranker skipped (no Gemini key or reranking disabled)")
+                logger.info("Reranker skipped (no VOYAGE_API_KEY or reranking disabled)")
         except Exception as e:
             logger.warning(f"Reranker init failed (non-fatal): {e}")
 
@@ -219,7 +289,7 @@ class EnhancedSimpleRAG:
                 logger.info("Query planner skipped (no Gemini key or planning disabled)")
         except Exception as e:
             logger.warning(f"Query planner init failed (non-fatal): {e}")
-    
+
     def is_agentic_ready(self) -> bool:
         """Check if Agentic AI functionality is ready."""
         return (self.agentic_service is not None and 
@@ -948,100 +1018,116 @@ class EnhancedSimpleRAG:
             logger.error(f"Error in normal mode query: {str(e)}")
             return f"Error processing your query: {str(e)}"
     
-    def _query_graph_mode(self, question: str, progress_tracker: Optional[ProgressTracker] = None) -> str:
-        """Query using graph RAG mode with hybrid search."""
-        try:
-            # Step 1: Query planning (HyDE + decomposition) — same as normal mode
-            if progress_tracker:
-                progress_tracker.update(10, 100, status="embedding",
-                                      message="Planning query and generating embeddings")
+    def _retrieve_graph_contexts(
+        self, question: str, doc_top_k: int, graph_top_k: int
+    ):
+        """Two-pass IRCoT-style graph retrieval.
 
-            if self.query_planner:
-                plan = self.query_planner.plan(question)
-            else:
-                plan = {"strategy": "simple", "sub_queries": [question], "hyde_docs": []}
+        Pass 1: standard semantic search — gets broad coverage.
+        Gap detection: which named publishers from the question are absent in pass-1 results?
+        Pass 2: topic-focused embedding + publisher metadata filter for each missing source.
+          Only fires for sources NOT already retrieved — avoids redundant searches and
+          keeps context budget tight.
 
-            # Step 2: Search both collections
-            if progress_tracker:
-                progress_tracker.update(20, 100, status="searching",
-                                      message="Searching documents and knowledge graph")
+        No query_planner (HyDE/decomposition): eval data proves it hurts graph mode.
+        Requires payload index on metadata.source — ensured at collection creation.
+        """
+        collection = self.config["collection_name"]
+        query_emb = self.embedding_service.get_embedding(question)
+        retrieval_k = doc_top_k * 2 if self.reranker else doc_top_k
 
-            top_k = self.config["top_k"]
-            retrieval_k = top_k * 3 if self.reranker else top_k
+        # Pass 1: semantic search
+        pass1 = self.vector_db_service.search_similar(
+            query_emb, top_k=retrieval_k, collection_name=collection
+        )
+        result_lists = [pass1]
 
-            # Search document chunks — embed each sub-query+HyDE, RRF-merge
-            result_lists = []
-            hyde_docs = plan.get("hyde_docs", [])
-            for i, q in enumerate(plan["sub_queries"]):
-                hyde = hyde_docs[i] if i < len(hyde_docs) and hyde_docs[i] else None
-                emb = self.embedding_service.get_embedding(hyde if hyde else q)
+        # Gap detection: which named publishers weren't surfaced in pass 1?
+        _named = [
+            s for s in _extract_named_sources(question)
+            if len(s) < 40 and "," not in s
+            and not any(w in s.lower() for w in ("while", "article", "suggests", "indicates"))
+        ]
+        if len(_named) >= 2:
+            retrieved_sources = {c["metadata"].get("source", "") for c in pass1}
+            missing = [s for s in _named[:2] if s not in retrieved_sources]
+            # Pass 2: targeted retrieval only for sources absent from pass 1
+            for src in missing:
+                topic_emb = self.embedding_service.get_embedding(
+                    _source_boost_query(src, question)
+                )
                 result_lists.append(self.vector_db_service.search_similar(
-                    emb, top_k=retrieval_k, collection_name=self.config["collection_name"]
+                    topic_emb, top_k=2, collection_name=collection,
+                    filters={"source": src},
                 ))
 
-            doc_contexts = rrf_merge(result_lists) if len(result_lists) > 1 else (result_lists[0] if result_lists else [])
+        doc_contexts = (
+            rrf_merge(result_lists) if len(result_lists) > 1
+            else (result_lists[0] if result_lists else [])
+        )
 
-            # Search graph elements (Neo4j traversal when available) — full top_k budget
+        if self.reranker and len(doc_contexts) > doc_top_k:
+            doc_contexts = self.reranker.rerank(question, doc_contexts, doc_top_k)
+        else:
+            doc_contexts = doc_contexts[:doc_top_k]
+
+        graph_contexts = self.graph_rag_service.search_graph(
+            question, top_k=graph_top_k, neo4j_service=self.neo4j_service
+        )
+
+        return doc_contexts, graph_contexts
+
+    def _query_graph_mode(self, question: str, progress_tracker: Optional[ProgressTracker] = None) -> str:
+        """Query using graph RAG mode."""
+        try:
+            if progress_tracker:
+                progress_tracker.update(10, 100, status="searching",
+                                        message="Searching documents and knowledge graph")
+
+            top_k = self.config["top_k"]
+            doc_top_k = top_k // 2
+
             if not self.neo4j_service:
                 logger.warning(
-                    "graph mode: Neo4j not configured — topology traversal disabled. "
-                    "Configure NEO4J_URI/NEO4J_USER/NEA4J_PASSWORD for full graph mode."
+                    "graph mode: Neo4j not configured — topology traversal disabled."
                 )
-            graph_contexts = self.graph_rag_service.search_graph(
-                question,
-                top_k=top_k,
-                neo4j_service=self.neo4j_service,
+
+            doc_contexts, graph_contexts = self._retrieve_graph_contexts(
+                question, doc_top_k=doc_top_k, graph_top_k=doc_top_k
             )
 
-            # Rerank doc_contexts down to top_k (not top_k//2)
-            if self.reranker and len(doc_contexts) > top_k:
-                if progress_tracker:
-                    progress_tracker.update(40, 100, status="reranking", message="Reranking document results")
-                doc_contexts = self.reranker.rerank(question, doc_contexts, top_k)
-
             all_contexts = doc_contexts + graph_contexts
-
             logger.info(f"Found {len(doc_contexts)} doc contexts and {len(graph_contexts)} graph contexts")
 
             if not all_contexts:
                 if progress_tracker:
                     progress_tracker.update(100, 100, status="complete",
-                                          message="No relevant information found")
+                                            message="No relevant information found")
                 return "I couldn't find any relevant information to answer your question in either the documents or knowledge graph."
 
-            # Step 3: Prepare graph context for enhanced prompting
             if progress_tracker:
-                progress_tracker.update(55, 100, status="analyzing",
-                                      message="Analyzing graph relationships")
+                progress_tracker.update(55, 100, status="generating",
+                                        message="Generating graph-enhanced answer")
 
             graph_context = {
-                "entities": [ctx for ctx in graph_contexts if ctx['metadata'].get('type') == 'entity'],
-                "relationships": [ctx for ctx in graph_contexts if ctx['metadata'].get('type') == 'relationship']
+                "entities": [c for c in graph_contexts if c["metadata"].get("type") == "entity"],
+                "relationships": [c for c in graph_contexts if c["metadata"].get("type") == "relationship"],
             }
 
-            # Step 4: Generate enhanced answer
-            if progress_tracker:
-                progress_tracker.update(70, 100, status="generating",
-                                      message="Generating graph-enhanced answer")
-            
             if self.llm_service and self.llm_service.is_available():
                 answer = self.llm_service.generate_answer(
-                    question,
-                    all_contexts,
-                    graph_context=graph_context,
-                    rag_mode="graph",
-                    progress_tracker=progress_tracker
+                    question, all_contexts,
+                    graph_context=graph_context, rag_mode="graph",
+                    progress_tracker=progress_tracker,
                 )
             else:
-                # Fallback to enhanced raw results
                 answer = self._format_graph_raw_results(doc_contexts, graph_contexts)
-            
+
             if progress_tracker:
-                progress_tracker.update(100, 100, status="complete", 
-                                      message="Graph RAG answer generated successfully")
-            
+                progress_tracker.update(100, 100, status="complete",
+                                        message="Graph RAG answer generated successfully")
             return answer
-            
+
         except Exception as e:
             logger.error(f"Error in graph mode query: {str(e)}")
             return f"Error processing your graph query: {str(e)}"
@@ -1719,21 +1805,17 @@ Answer:"""
         return answer, contexts
 
     def _query_graph_debug(self, question: str):
-        """Graph RAG retrieval — returns (answer, doc_contexts, graph_contexts)."""
-        query_embedding = self.embedding_service.get_embedding(question)
+        """Graph RAG retrieval — returns (answer, doc_contexts, graph_contexts).
+
+        Calls the same _retrieve_graph_contexts as _query_graph_mode so eval
+        and production always test identical retrieval logic.
+        """
         top_k = self.config["top_k"]
-        retrieval_k = top_k * 2 if self.reranker else top_k // 2
+        doc_top_k = top_k // 2
 
-        doc_contexts = self.vector_db_service.search_similar(
-            query_embedding, top_k=retrieval_k,
-            collection_name=self.config["collection_name"]
+        doc_contexts, graph_contexts = self._retrieve_graph_contexts(
+            question, doc_top_k=doc_top_k, graph_top_k=doc_top_k
         )
-        graph_contexts = self.graph_rag_service.search_graph(
-            question, top_k=top_k // 2, neo4j_service=self.neo4j_service
-        )
-
-        if self.reranker and len(doc_contexts) > top_k // 2:
-            doc_contexts = self.reranker.rerank(question, doc_contexts, top_k // 2)
 
         all_contexts = doc_contexts + graph_contexts
         if not all_contexts:

@@ -38,7 +38,9 @@ import os
 import random
 import re
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -54,14 +56,18 @@ BENCHMARK_CORPUS_TAG = "multihop_rag"
 DOC_COLLECTION_NORMAL  = "multihop_normal_docs"
 DOC_COLLECTION_GRAPH   = "multihop_graph_docs"
 GRAPH_COLLECTION       = "multihop_graph"
+DOC_COLLECTION_HYBRID  = "multihop_graph_docs_hybrid"  # dense + BM25 sparse
 
 # Overridden by --real-collections flag to use the main app collections from dev_config.json
 _REAL_COLLECTION_OVERRIDE: str = ""
 _REAL_GRAPH_COLLECTION_OVERRIDE: str = ""
+_USE_HYBRID: bool = False
 
 def _doc_collection_for(mode: str) -> str:
     if _REAL_COLLECTION_OVERRIDE:
         return _REAL_COLLECTION_OVERRIDE
+    if _USE_HYBRID and mode == "graph":
+        return DOC_COLLECTION_HYBRID
     return DOC_COLLECTION_NORMAL if mode == "normal" else DOC_COLLECTION_GRAPH
 
 def _graph_collection() -> str:
@@ -181,6 +187,7 @@ def _build_cfg(mode: str) -> Dict:
         "chunk_size":             1500,
         "chunk_overlap":          150,
         "top_k":                  10,
+        "hybrid_search":          _USE_HYBRID and mode == "graph",
         "rate_limit":             1000,
         "enable_cache":           False,
         "cache_dir":              None,
@@ -410,6 +417,66 @@ def _sanity_check_qdrant(rag, mode: str):
                 print(f"  WARNING: Neo4j sanity check error: {e}")
 
 
+# ── hybrid collection builder ─────────────────────────────────────────────────
+
+def _build_hybrid_from_dense(rag, source_collection: str, hybrid_collection: str):
+    """Build a hybrid (dense + BM25 sparse) collection from an existing dense collection.
+
+    Scrolls the source collection, computes BM25 sparse for each chunk's text,
+    and upserts both vectors into the hybrid collection. Reuses existing dense
+    vectors — no re-chunking or re-embedding needed.
+    """
+    import bm25_service
+    from qdrant_client.models import PointStruct
+
+    vdb = rag.vector_db_service
+    created = vdb.ensure_hybrid_collection_exists(hybrid_collection)
+    if not created:
+        info = vdb.get_collection_info(hybrid_collection)
+        if info.get("points_count", 0) > 0:
+            print(f"  Hybrid collection already populated ({info['points_count']} points), skipping build")
+            return
+
+    print(f"  Migrating {source_collection} → {hybrid_collection} (adding BM25 sparse)…")
+    total = 0
+    offset = None
+    batch_size = 100
+
+    while True:
+        results, next_offset = vdb.client.scroll(
+            collection_name=source_collection,
+            limit=batch_size,
+            offset=offset,
+            with_payload=True,
+            with_vectors=True,
+        )
+        if not results:
+            break
+
+        texts        = [p.payload.get("text", "") for p in results]
+        dense_vecs   = [p.vector for p in results]
+        payloads     = [p.payload for p in results]
+        sparse_vecs  = bm25_service.encode_documents(texts)
+
+        points = [
+            PointStruct(
+                id=p.id,
+                vector={"dense": dense, "sparse": sparse},
+                payload=payload,
+            )
+            for p, dense, sparse, payload in zip(results, dense_vecs, sparse_vecs, payloads)
+        ]
+        vdb.client.upsert(collection_name=hybrid_collection, points=points)
+        total += len(points)
+        print(f"    migrated {total} chunks…")
+
+        if next_offset is None or len(results) < batch_size:
+            break
+        offset = next_offset
+
+    print(f"  Hybrid collection ready: {total} points in {hybrid_collection!r}")
+
+
 # ── indexing ──────────────────────────────────────────────────────────────────
 
 def _index_one_doc(args: Tuple) -> Tuple[int, bool, dict]:
@@ -477,6 +544,7 @@ def run_multihop_real(
     seed: int = 42,
     reset: bool = False,
     skip_index: bool = False,
+    workers: int = 1,
 ):
     print("\n" + "=" * 70)
     print("  REAL MultiHop-RAG Benchmark (yixuantt/MultiHopRAG, COLM 2024)")
@@ -626,21 +694,44 @@ def run_multihop_real(
         _reset_benchmark_collections(modes)
 
     for mode in modes:
+        rag, _ = _get_rag(mode)
+        rag.rag_mode = mode
+        if hasattr(rag, "document_processor") and rag.document_processor:
+            rag.document_processor.rag_mode = mode
+
         if skip_index:
             print(f"\n[4/5] Skipping indexing for mode={mode} (--skip-index)")
-            rag, _ = _get_rag(mode)
         else:
-            print(f"\n[4/5] Indexing for mode={mode}…")
-            rag, _ = _get_rag(mode)
-            rag.rag_mode = mode
-            if hasattr(rag, "document_processor") and rag.document_processor:
-                rag.document_processor.rag_mode = mode
+            # Pre-check: if collection already has the expected number of docs, skip entirely.
+            # Avoids 609 individual Qdrant hash-lookup threads on every re-run.
+            doc_col = _doc_collection_for(mode)
+            try:
+                existing = rag.vector_db_service.client.get_collection(doc_col).points_count
+            except Exception:
+                existing = 0
+            if existing >= len(docs_to_index):
+                print(f"\n[4/5] Collection '{doc_col}' already has {existing} points "
+                      f"(≥ {len(docs_to_index)} expected) — skipping re-index for mode={mode}")
+            else:
+                print(f"\n[4/5] Indexing for mode={mode}… ({existing}/{len(docs_to_index)} existing)")
+                indexed = _index_corpus_docs(mode, docs_to_index)
+                print(f"  Indexed {indexed}/{len(docs_to_index)} docs for mode={mode}")
+                if indexed == 0:
+                    print(f"\n  ERROR: 0 docs indexed for mode={mode}. Aborting.")
+                    sys.exit(1)
 
-            indexed = _index_corpus_docs(mode, docs_to_index)
-            print(f"  Indexed {indexed}/{len(docs_to_index)} docs for mode={mode}")
-            if indexed == 0:
-                print(f"\n  ERROR: 0 docs indexed for mode={mode}. Aborting.")
-                sys.exit(1)
+        # Build hybrid collection from the just-indexed dense collection
+        if _USE_HYBRID and mode == "graph":
+            print(f"\n[4/5-hybrid] Building BM25 hybrid collection for mode={mode}…")
+            rag, _ = _get_rag(mode)
+            _build_hybrid_from_dense(rag, DOC_COLLECTION_GRAPH, DOC_COLLECTION_HYBRID)
+
+        # Ensure payload indexes exist — required for metadata-filtered searches.
+        # Idempotent: safe to call on existing collections.
+        if rag.vector_db_service:
+            doc_col = _doc_collection_for(mode)
+            rag.vector_db_service.ensure_payload_indexes(doc_col)
+            print(f"  [indexes] payload indexes ensured for '{doc_col}'")
 
         # Sanity check
         print(f"\n[sanity] mode={mode}")
@@ -665,17 +756,19 @@ def run_multihop_real(
 
         q_type_stats: Dict[str, Dict] = {}
 
-        for qi, qa in enumerate(selected_qa):
-            question  = str(qa.get(q_field, "")).strip()
-            golden    = str(qa.get(ans_field, "")).strip() if ans_field else ""
-            ev_raw    = qa.get(ev_field, []) if ev_field else []
-            q_type    = str(qa.get(qt_field, "unknown")).strip() if qt_field else "unknown"
+        _print_lock = threading.Lock()
+        completed_count = [0]  # mutable for closure
 
+        def _eval_one(args):
+            qi, qa = args
+            question = str(qa.get(q_field, "")).strip()
+            golden   = str(qa.get(ans_field, "")).strip() if ans_field else ""
+            ev_raw   = qa.get(ev_field, []) if ev_field else []
+            q_type   = str(qa.get(qt_field, "unknown")).strip() if qt_field else "unknown"
             if not question:
-                continue
+                return None
 
             ev_strings = _parse_evidence_list(ev_raw)
-
             t0 = time.time()
             try:
                 out = rag.query_debug(question)
@@ -684,57 +777,32 @@ def run_multihop_real(
                 out = {"answer": f"ERROR: {e}", "contexts_doc": [], "contexts_graph": []}
             elapsed = time.time() - t0
 
-            answer    = out.get("answer", "")
-            doc_ctxs  = out.get("contexts_doc", [])
+            answer     = out.get("answer", "")
+            doc_ctxs   = out.get("contexts_doc", [])
             graph_ctxs = out.get("contexts_graph", [])
-            all_ctxs  = doc_ctxs + graph_ctxs
+            all_ctxs   = doc_ctxs + graph_ctxs
 
             n_doc_ctx   = len(doc_ctxs)
             n_graph_ctx = len(graph_ctxs)
-            n_traversal = sum(
-                1 for c in graph_ctxs
-                if c.get("metadata", {}).get("discovery_method") == "neo4j_traversal"
-            )
-            n_semantic_trav = sum(
-                1 for c in graph_ctxs
-                if c.get("metadata", {}).get("discovery_method") == "neo4j_traversal"
-                and c.get("metadata", {}).get("provenance") != "co_occurrence"
-            )
-            n_cooccur_trav = sum(
-                1 for c in graph_ctxs
-                if c.get("metadata", {}).get("discovery_method") == "neo4j_traversal"
-                and c.get("metadata", {}).get("provenance") == "co_occurrence"
-            )
+            n_traversal = sum(1 for c in graph_ctxs if c.get("metadata", {}).get("discovery_method") == "neo4j_traversal")
+            n_sem_trav  = sum(1 for c in graph_ctxs if c.get("metadata", {}).get("discovery_method") == "neo4j_traversal" and c.get("metadata", {}).get("provenance") != "co_occurrence")
+            n_co_trav   = sum(1 for c in graph_ctxs if c.get("metadata", {}).get("discovery_method") == "neo4j_traversal" and c.get("metadata", {}).get("provenance") == "co_occurrence")
 
-            total_doc_ctx       += n_doc_ctx
-            total_graph_ctx     += n_graph_ctx
-            total_traversal     += n_traversal
-            total_semantic_trav += n_semantic_trav
-            total_cooccur_trav  += n_cooccur_trav
-
-            # Evidence recall
             partial_recall, full_hop_recall = _evidence_recall(ev_strings, all_ctxs)
+            exact_match = (golden.lower() in answer.lower() or answer.lower() in golden.lower()) if golden and answer else False
+            passed = judge_answer(question, golden, answer) if golden else None
 
-            # Exact/normalized match (simple substring)
-            exact_match = (
-                golden.lower() in answer.lower() or answer.lower() in golden.lower()
-                if golden and answer else False
-            )
+            with _print_lock:
+                completed_count[0] += 1
+                icon = "✓" if passed else ("?" if passed is None else "✗")
+                print(f"    {icon} [Q{qi+1}|{completed_count[0]}/{len(selected_qa)}] "
+                      f"type={q_type[:12]} judge={passed} "
+                      f"ev_recall={partial_recall:.2f} full_hop={full_hop_recall:.0f} "
+                      f"doc_ctx={n_doc_ctx} graph_ctx={n_graph_ctx} "
+                      f"traversal={n_traversal}(sem={n_sem_trav},co={n_co_trav}) {elapsed:.1f}s")
 
-            # LLM judge (only if golden available)
-            if golden:
-                passed = judge_answer(question, golden, answer)
-            else:
-                passed = None
-
-            icon = "✓" if passed else ("?" if passed is None else "✗")
-            print(f"    {icon} [Q{qi+1}] type={q_type[:12]} judge={passed} "
-                  f"ev_recall={partial_recall:.2f} full_hop={full_hop_recall:.0f} "
-                  f"doc_ctx={n_doc_ctx} graph_ctx={n_graph_ctx} "
-                  f"traversal={n_traversal}(sem={n_semantic_trav},co={n_cooccur_trav}) "
-                  f"{elapsed:.1f}s")
-
-            row = {
+            return {
+                "qi": qi,
                 "question":              question[:120],
                 "golden":                golden[:120] if golden else "",
                 "answer":                answer[:300] if answer else "",
@@ -747,17 +815,33 @@ def run_multihop_real(
                 "doc_ctx_count":         n_doc_ctx,
                 "graph_ctx_count":       n_graph_ctx,
                 "traversal_count":       n_traversal,
-                "semantic_traversal":    n_semantic_trav,
-                "cooccurrence_traversal": n_cooccur_trav,
+                "semantic_traversal":    n_sem_trav,
+                "cooccurrence_traversal": n_co_trav,
                 "latency_s":             round(elapsed, 2),
             }
-            mode_rows.append(row)
 
-            # Per question-type aggregation
+        n_workers = workers
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            futures = [pool.submit(_eval_one, (qi, qa)) for qi, qa in enumerate(selected_qa)]
+            raw_rows = [f.result() for f in as_completed(futures)]
+
+        for row in raw_rows:
+            if row is None:
+                continue
+            mode_rows.append(row)
+            total_doc_ctx       += row["doc_ctx_count"]
+            total_graph_ctx     += row["graph_ctx_count"]
+            total_traversal     += row["traversal_count"]
+            total_semantic_trav += row["semantic_traversal"]
+            total_cooccur_trav  += row["cooccurrence_traversal"]
+            partial_recall       = row["evidence_recall"]
+            full_hop_recall      = row["full_hop_recall"]
+            q_type               = row["question_type"]
+            passed               = row["passed"]
             if q_type not in q_type_stats:
                 q_type_stats[q_type] = {"n": 0, "passed": 0, "ev_recall": 0.0}
-            q_type_stats[q_type]["n"] += 1
-            q_type_stats[q_type]["passed"] += (1 if passed else 0)
+            q_type_stats[q_type]["n"]       += 1
+            q_type_stats[q_type]["passed"]  += (1 if passed else 0)
             q_type_stats[q_type]["ev_recall"] += partial_recall
 
         # Aggregate
@@ -921,6 +1005,7 @@ def main():
         help="Output JSON path",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for question/distractor selection")
+    parser.add_argument("--workers", type=int, default=26, help="Parallel question workers")
     parser.add_argument(
         "--reset", action="store_true",
         help="Delete and recreate multihop_* Qdrant collections and Neo4j corpus data before indexing. "
@@ -935,6 +1020,11 @@ def main():
         "--skip-index", action="store_true",
         help="Skip indexing phase entirely — use whatever is already in the collections.",
     )
+    parser.add_argument(
+        "--hybrid", action="store_true",
+        help="Use hybrid (dense + BM25 sparse) retrieval for graph mode. "
+             "Creates multihop_graph_docs_hybrid collection and re-indexes if not present.",
+    )
     args = parser.parse_args()
 
     if args.real_collections:
@@ -943,6 +1033,11 @@ def main():
         _REAL_COLLECTION_OVERRIDE = dev_cfg.get("collection_name", "simple_rag_normal")
         _REAL_GRAPH_COLLECTION_OVERRIDE = dev_cfg.get("graph_collection_name", "simple_rag_graph")
         print(f"[real-collections] docs → {_REAL_COLLECTION_OVERRIDE!r}, graph → {_REAL_GRAPH_COLLECTION_OVERRIDE!r}")
+
+    if args.hybrid:
+        global _USE_HYBRID
+        _USE_HYBRID = True
+        print(f"[hybrid] BM25+dense hybrid search enabled → collection: {DOC_COLLECTION_HYBRID!r}")
 
     _validate_env()
     RESULTS_DIR.mkdir(exist_ok=True)
@@ -955,6 +1050,7 @@ def main():
         seed=args.seed,
         reset=args.reset,
         skip_index=args.skip_index,
+        workers=args.workers,
     )
 
     # Write JSON

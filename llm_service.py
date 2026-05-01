@@ -17,6 +17,38 @@ logger = logging.getLogger(__name__)
 
 GEMINI_MODEL = "gemini/gemini-2.5-flash"
 
+# Keywords that signal the question requires numerical extraction + arithmetic.
+# Kept deliberately narrow to avoid false positives on non-numeric questions.
+_ARITHMETIC_KW = frozenset({
+    "quick ratio", "current ratio", "debt ratio", "coverage ratio",
+    "effective tax rate", "tax rate", "gross margin", "operating margin",
+    "net margin", "profit margin", "return on", "earnings per share",
+    "revenue growth", "percentage change", "percent change",
+})
+
+def _is_arithmetic(question: str) -> bool:
+    """True when the question structurally requires extracting numbers and computing."""
+    q = question.lower()
+    return any(kw in q for kw in _ARITHMETIC_KW)
+
+
+# Keywords that signal a temporal ordering / consistency question about articles.
+_TEMPORAL_ARTICLE_KW = frozenset({
+    "after", "before", "first", "later", "earlier", "subsequent",
+    "inconsistent", "change", "inconsistency", "between", "since", "until",
+})
+_TEMPORAL_ARTICLE_ANCHOR = frozenset({
+    "report", "article", "published", "publication", "date", "time",
+})
+
+def _is_temporal_query(question: str) -> bool:
+    """True when question asks about temporal ordering or consistency across articles."""
+    q = question.lower()
+    return (
+        any(kw in q for kw in _TEMPORAL_ARTICLE_KW) and
+        any(a in q for a in _TEMPORAL_ARTICLE_ANCHOR)
+    )
+
 
 def _clean_source_name(metadata: dict) -> str:
     """Return a human-readable source name from chunk metadata."""
@@ -238,25 +270,41 @@ class LLMService:
         complexity_level = complexity.get('complexity_level', 'simple')
         response_type = complexity.get('response_type', 'Brief answer')
 
-        prompt = f"""You are a helpful AI assistant. Answer the question based on the provided documents.
+        _needs_calc = _is_arithmetic(query)
+        _list_instr = (
+            "Provide comprehensive details with proper structure for list/detail queries"
+            if complexity_level in ['complex', 'very_complex']
+            else "Then provide supporting details if needed"
+        )
+        _list_item = (
+            "6. For list queries: Use clear structure (numbered lists, bullet points, sections)"
+            if complexity_level in ['complex', 'very_complex'] else ""
+        )
+        _calc_block = (
+            "\nCALCULATION REQUIRED:\n"
+            "Before writing your answer, extract the relevant numbers from the documents above, "
+            "show the formula and arithmetic, then state the result. Format:\n"
+            "  Numbers: [list each value and its label]\n"
+            "  Calculation: [formula and result]\n"
+            "  Answer: [conclusion based on the computed result]\n"
+        ) if _needs_calc else ""
 
-DOCUMENTS:
-{context_text}
-
-QUESTION: {query}
-
-INSTRUCTIONS:
-Expected Response Type: {response_type}
-Complexity Level: {complexity_level}
-
-1. Give a direct answer first (1-2 sentences for simple queries, more comprehensive for complex)
-2. {"Provide comprehensive details with proper structure for list/detail queries" if complexity_level in ['complex', 'very_complex'] else "Then provide supporting details if needed"}
-3. Use inline citations like (Source: filename.pdf) when referencing specific information
-4. If information comes from multiple sources, mention this naturally
-5. If the answer cannot be fully determined from the documents, say so clearly
-{"6. For list queries: Use clear structure (numbered lists, bullet points, sections)" if complexity_level in ['complex', 'very_complex'] else ""}
-
-ANSWER:"""
+        prompt = (
+            "You are a helpful AI assistant. Answer the question based on the provided documents.\n\n"
+            f"DOCUMENTS:\n{context_text}\n\n"
+            f"QUESTION: {query}\n\n"
+            "INSTRUCTIONS:\n"
+            f"Expected Response Type: {response_type}\n"
+            f"Complexity Level: {complexity_level}\n\n"
+            "1. Give a direct answer first (1-2 sentences for simple queries, more comprehensive for complex)\n"
+            f"2. {_list_instr}\n"
+            "3. Use inline citations like (Source: filename.pdf) when referencing specific information\n"
+            "4. If information comes from multiple sources, mention this naturally\n"
+            "5. If the answer cannot be fully determined from the documents, say so clearly\n"
+            f"{'6. ' + _list_item if _list_item else ''}"
+            f"{_calc_block}\n"
+            "ANSWER:"
+        )
 
         return self._generate_with_gemini(prompt, progress_tracker)
 
@@ -272,7 +320,9 @@ ANSWER:"""
             doc_sections = []
             for ctx in document_contexts[:8]:
                 filename = _clean_source_name(ctx['metadata'])
-                doc_sections.append(f"[Source: {filename}]\n{ctx['text']}")
+                pub_date = ctx['metadata'].get('published_at', '')
+                date_label = f", Published: {pub_date[:10]}" if pub_date else ""
+                doc_sections.append(f"[Source: {filename}{date_label}]\n{ctx['text']}")
             document_text = "\n\n".join(doc_sections)
 
         entities_text = ""
@@ -327,6 +377,7 @@ QUESTION: {query}
         _is_comparison = _is_yn and any(
             kw in _q_lower for kw in ("agree", "align", "consistent", "same as", "match", "both claim", "also claim")
         )
+        _needs_calc = _is_arithmetic(query)
 
         prompt += "INSTRUCTIONS:\n"
         if _is_comparison:
@@ -344,8 +395,16 @@ QUESTION: {query}
 4. Only say "Insufficient information" if the context contains nothing relevant at all.
 5. Use inline citations: (Source: filename)
 6. If showing relationship chains, use format: Entity -> relationship -> Entity
-
-ANSWER:"""
+"""
+        if _needs_calc:
+            prompt += """
+CALCULATION REQUIRED:
+Before writing your answer, extract the relevant numbers from the context above, show the formula and arithmetic, then state the result. Format:
+  Numbers: [list each value and its label]
+  Calculation: [formula and result]
+  Answer: [conclusion based on the computed result]
+"""
+        prompt += "\nANSWER:"
 
         return self._generate_with_gemini(prompt, progress_tracker)
 
@@ -366,7 +425,7 @@ ANSWER:"""
             resp = litellm.completion(
                 model=GEMINI_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
+                temperature=0,
                 max_tokens=max_tokens,
                 extra_body={"generationConfig": {"thinkingConfig": {"thinkingBudget": 0}}},
             )

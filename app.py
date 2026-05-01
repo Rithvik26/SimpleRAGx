@@ -353,6 +353,7 @@ def setup():
             "gemini_api_key": request.form.get('gemini_api_key', '').strip(),
             "qdrant_api_key": request.form.get('qdrant_api_key', '').strip(),
             "qdrant_url": request.form.get('qdrant_url', '').strip(),
+            "voyage_api_key": request.form.get('voyage_api_key', '').strip(),
             "preferred_llm": request.form.get('preferred_llm', ''),
             "rag_mode": request.form.get('rag_mode', '')
         }

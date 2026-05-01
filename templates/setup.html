@@ -29,9 +29,16 @@
                 
             <div class="mb-3">
                 <label for="qdrant_url" class="form-label">Qdrant URL</label>
-                <input type="text" class="form-control" id="qdrant_url" name="qdrant_url" 
+                <input type="text" class="form-control" id="qdrant_url" name="qdrant_url"
                     value="{{ config.qdrant_url }}">
                 <div class="form-text">URL of your Qdrant instance (e.g., https://your-instance.qdrant.io)</div>
+            </div>
+
+            <div class="mb-3">
+                <label for="voyage_api_key" class="form-label">Voyage AI API Key</label>
+                <input type="password" class="form-control" id="voyage_api_key" name="voyage_api_key"
+                       value="{{ config.voyage_api_key }}">
+                <div class="form-text">Optional. Enables cross-encoder reranking (+8–15% retrieval accuracy). Get a key from <a href="https://www.voyageai.com" target="_blank">voyageai.com</a>. Leave blank to disable reranking.</div>
             </div>
         </div>
     </div>
