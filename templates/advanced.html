@@ -5,67 +5,151 @@
 {% block content %}
 <h2>Advanced Information</h2>
 
+<!-- What's New -->
+<div class="card mb-4 border-success">
+    <div class="card-header bg-success text-white">
+        <h5 class="mb-0">🚀 Recent Advancements</h5>
+    </div>
+    <div class="card-body">
+        <div class="row g-3">
+            <div class="col-md-6">
+                <div class="d-flex align-items-start gap-2">
+                    <span class="badge bg-primary mt-1">NEW</span>
+                    <div>
+                        <strong>BM25 Hybrid Search</strong>
+                        <p class="mb-0 text-muted small">Dense semantic vectors + sparse BM25 keyword vectors searched simultaneously in Qdrant. Catches exact-match terms that pure embedding search misses.</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="d-flex align-items-start gap-2">
+                    <span class="badge bg-primary mt-1">NEW</span>
+                    <div>
+                        <strong>Voyage AI Rerank 2.5</strong>
+                        <p class="mb-0 text-muted small">Cross-encoder reranking replaces LLM-based reranking. Attends jointly to query + document — +8–15% retrieval accuracy, highest nDCG@10 on BEIR.</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="d-flex align-items-start gap-2">
+                    <span class="badge bg-success mt-1">SEC</span>
+                    <div>
+                        <strong>Encrypted Key Storage</strong>
+                        <p class="mb-0 text-muted small">API keys are Fernet-encrypted at rest. Keys are stripped from all server responses and never rendered into page source or DevTools.</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="d-flex align-items-start gap-2">
+                    <span class="badge bg-primary mt-1">NEW</span>
+                    <div>
+                        <strong>PageIndex (Vectorless RAG)</strong>
+                        <p class="mb-0 text-muted small">Agentic reasoning-based retrieval — no embeddings or vector DB required. Uses tool-calling loops to locate and synthesise answers directly from document pages.</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="d-flex align-items-start gap-2">
+                    <span class="badge bg-primary mt-1">NEW</span>
+                    <div>
+                        <strong>Query Planning (HyDE + Decomposition)</strong>
+                        <p class="mb-0 text-muted small">Multi-hop queries are decomposed into sub-questions. Hypothetical Document Embeddings (HyDE) expand sparse queries before retrieval.</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="d-flex align-items-start gap-2">
+                    <span class="badge bg-warning text-dark mt-1">UPD</span>
+                    <div>
+                        <strong>Parallel Document Indexing</strong>
+                        <p class="mb-0 text-muted small">Batch graph embedding and parallel doc-level indexing with skip-cache. Large documents index significantly faster with fewer redundant API calls.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Current Configuration -->
 <div class="card mb-4">
     <div class="card-header">
         <h5>Current Configuration</h5>
     </div>
     <div class="card-body">
         <table class="table">
-            <tr>
-                <th>Setting</th>
-                <th>Value</th>
-            </tr>
-            <!-- NEW: Add RAG Mode display -->
+            <tr><th>Setting</th><th>Value</th></tr>
             <tr>
                 <td>RAG Mode</td>
                 <td>
-                    <span class="badge bg-{{ 'success' if config.rag_mode == 'graph' else 'primary' }}">
+                    <span class="badge bg-{{ 'success' if config.rag_mode == 'graph' else ('warning text-dark' if config.rag_mode == 'neo4j' else 'primary') }}">
                         {{ config.rag_mode|title }} RAG
                     </span>
                 </td>
-            </tr>
-            <tr>
-                <td>Embedding Model</td>
-                <td>Gemini Embedding API</td>
-            </tr>
-            <tr>
-                <td>Vector Database</td>
-                <td>Qdrant Cloud</td>
-            </tr>
-            <!-- NEW: Add collection information -->
-            <tr>
-                <td>Document Collection</td>
-                <td>{{ config.collection_name }}</td>
-            </tr>
-            <tr>
-                <td>Graph Collection</td>
-                <td>{{ config.graph_collection_name }}</td>
             </tr>
             <tr>
                 <td>Preferred LLM</td>
                 <td>{{ config.preferred_llm }}</td>
             </tr>
             <tr>
+                <td>Embedding Model</td>
+                <td>Gemini Embedding API (768-dim)</td>
+            </tr>
+            <tr>
+                <td>Hybrid Search</td>
+                <td><span class="badge bg-primary">Dense + BM25 Sparse</span></td>
+            </tr>
+            <tr>
+                <td>Reranker</td>
+                <td>
+                    {% if config.enable_reranking %}
+                        <span class="badge bg-success">Voyage AI Rerank 2.5 ✓</span>
+                    {% else %}
+                        <span class="badge bg-secondary">Disabled</span>
+                    {% endif %}
+                </td>
+            </tr>
+            <tr>
+                <td>Query Planning</td>
+                <td>
+                    {% if config.enable_query_planning %}
+                        <span class="badge bg-success">HyDE + Decomposition ✓</span>
+                    {% else %}
+                        <span class="badge bg-secondary">Disabled</span>
+                    {% endif %}
+                </td>
+            </tr>
+            <tr>
+                <td>Vector Database</td>
+                <td>Qdrant Cloud</td>
+            </tr>
+            <tr>
+                <td>Document Collection</td>
+                <td><code>{{ config.collection_name }}</code></td>
+            </tr>
+            <tr>
+                <td>Graph Collection</td>
+                <td><code>{{ config.graph_collection_name }}</code></td>
+            </tr>
+            <tr>
                 <td>Chunk Size</td>
-                <td>{{ config.chunk_size }}</td>
+                <td>{{ config.chunk_size }} chars</td>
             </tr>
             <tr>
                 <td>Chunk Overlap</td>
-                <td>{{ config.chunk_overlap }}</td>
+                <td>{{ config.chunk_overlap }} chars</td>
             </tr>
             <tr>
                 <td>Results Count (Top K)</td>
                 <td>{{ config.top_k }}</td>
             </tr>
             <tr>
-                <td>API Rate Limit</td>
-                <td>{{ config.rate_limit }} calls per minute</td>
-            </tr>
-            <tr>
                 <td>Embedding Cache</td>
                 <td>{{ "Enabled" if config.enable_cache else "Disabled" }}</td>
             </tr>
-            <!-- NEW: Add Graph RAG specific settings -->
+            <tr>
+                <td>Key Encryption</td>
+                <td><span class="badge bg-success">Fernet AES-128 at rest ✓</span></td>
+            </tr>
             {% if config.rag_mode == 'graph' %}
             <tr>
                 <td>Max Entities per Chunk</td>
@@ -73,7 +157,7 @@
             </tr>
             <tr>
                 <td>Graph Reasoning Depth</td>
-                <td>{{ config.graph_reasoning_depth }}</td>
+                <td>{{ config.graph_reasoning_depth }} hops</td>
             </tr>
             <tr>
                 <td>Entity Similarity Threshold</td>
@@ -84,128 +168,124 @@
     </div>
 </div>
 
-<!-- NEW: Add RAG Mode Comparison -->
+<!-- Retrieval Pipeline -->
+<div class="card mb-4">
+    <div class="card-header">
+        <h5>Retrieval Pipeline</h5>
+    </div>
+    <div class="card-body">
+        <div class="row g-3">
+            <div class="col-md-3 text-center">
+                <div class="p-3 border rounded bg-light">
+                    <div style="font-size:1.5rem;">📄</div>
+                    <strong>1. Query Planning</strong>
+                    <p class="text-muted small mb-0">HyDE expansion + sub-question decomposition</p>
+                </div>
+            </div>
+            <div class="col-md-3 text-center">
+                <div class="p-3 border rounded bg-light">
+                    <div style="font-size:1.5rem;">🔍</div>
+                    <strong>2. Hybrid Retrieval</strong>
+                    <p class="text-muted small mb-0">Dense (Gemini embeddings) + Sparse (BM25) searched in parallel</p>
+                </div>
+            </div>
+            <div class="col-md-3 text-center">
+                <div class="p-3 border rounded bg-light">
+                    <div style="font-size:1.5rem;">🎯</div>
+                    <strong>3. Reranking</strong>
+                    <p class="text-muted small mb-0">Voyage AI Rerank 2.5 cross-encoder re-scores the candidate pool</p>
+                </div>
+            </div>
+            <div class="col-md-3 text-center">
+                <div class="p-3 border rounded bg-light">
+                    <div style="font-size:1.5rem;">✨</div>
+                    <strong>4. Synthesis</strong>
+                    <p class="text-muted small mb-0">LLM generates grounded answer from top-ranked chunks</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- RAG Mode Comparison -->
 <div class="card mb-4">
     <div class="card-header">
         <h5>RAG Mode Comparison</h5>
     </div>
     <div class="card-body">
         <div class="row">
-            <div class="col-md-6">
+            <div class="col-md-4">
                 <h6 class="text-primary">📚 Normal RAG</h6>
                 <ul>
-                    <li><strong>Speed:</strong> Fast processing</li>
-                    <li><strong>Accuracy:</strong> Good for direct facts</li>
-                    <li><strong>Use Case:</strong> Simple Q&A, document search</li>
+                    <li><strong>Speed:</strong> Fast</li>
+                    <li><strong>Search:</strong> Hybrid dense + BM25</li>
+                    <li><strong>Best for:</strong> Direct facts, document search</li>
                     <li><strong>Storage:</strong> Single vector collection</li>
-                    <li><strong>Processing:</strong> Chunking + embedding</li>
                 </ul>
             </div>
-            <div class="col-md-6">
+            <div class="col-md-4">
                 <h6 class="text-success">🕸️ Graph RAG</h6>
                 <ul>
                     <li><strong>Speed:</strong> Slower, more thorough</li>
-                    <li><strong>Accuracy:</strong> Excellent for relationships</li>
-                    <li><strong>Use Case:</strong> Complex reasoning, connections</li>
-                    <li><strong>Storage:</strong> Two collections (docs + graph)</li>
-                    <li><strong>Processing:</strong> Entity extraction + graph building</li>
+                    <li><strong>Search:</strong> Hybrid + entity graph traversal</li>
+                    <li><strong>Best for:</strong> Relationships, multi-hop reasoning</li>
+                    <li><strong>Storage:</strong> Docs + graph collections</li>
+                </ul>
+            </div>
+            <div class="col-md-4">
+                <h6 class="text-warning">⚡ PageIndex</h6>
+                <ul>
+                    <li><strong>Speed:</strong> Variable (agentic loop)</li>
+                    <li><strong>Search:</strong> No vectors — tool-based page lookup</li>
+                    <li><strong>Best for:</strong> Precise page-level extraction</li>
+                    <li><strong>Storage:</strong> No vector DB required</li>
                 </ul>
             </div>
         </div>
     </div>
 </div>
 
+<!-- Security -->
 <div class="card mb-4">
     <div class="card-header">
-        <h5>Performance Features</h5>
+        <h5>🔒 Security</h5>
     </div>
     <div class="card-body">
-        <h6>1. Rate Limiting</h6>
-        <p>SimpleRAG implements rate limiting for API calls to prevent exceeding API provider quotas and avoid service interruptions. This is especially important for Graph RAG which makes additional API calls for entity extraction.</p>
-        
-        <h6>2. Embedding Cache</h6>
-        <p>To improve performance and reduce API costs, SimpleRAG caches embeddings locally. This is particularly beneficial for Graph RAG where similar entities might be processed multiple times.</p>
-        
-        <h6>3. Progress Tracking</h6>
-        <p>For long-running operations like Graph RAG indexing, SimpleRAG provides detailed real-time progress indicators showing entity extraction, relationship mapping, and graph building status.</p>
-        
-        <!-- NEW: Add Graph RAG specific feature -->
-        <h6>4. Dual Collection Storage</h6>
-        <p>Graph RAG uses two Qdrant collections: one for document chunks and another for graph elements (entities and relationships), enabling hybrid search strategies.</p>
-    </div>
-</div>
-
-<div class="card mb-4">
-    <div class="card-header">
-        <h5>How It Works</h5>
-    </div>
-    <div class="card-body">
-        <!-- NEW: Split into two columns for comparison -->
-        <div class="row">
+        <div class="row g-3">
             <div class="col-md-6">
-                <h6 class="text-primary">Normal RAG Process</h6>
-                <ol>
-                    <li>Document parsing and text extraction</li>
-                    <li>Split into overlapping chunks</li>
-                    <li>Generate embeddings using Gemini API</li>
-                    <li>Store in Qdrant vector database</li>
-                    <li>Query with semantic similarity search</li>
-                    <li>Generate answer with Claude LLM</li>
-                </ol>
+                <h6>Encryption at Rest</h6>
+                <p class="text-muted small">API keys are encrypted with Fernet (AES-128-CBC + HMAC-SHA256) before being written to disk. The plaintext key never appears in the config file.</p>
             </div>
             <div class="col-md-6">
-                <h6 class="text-success">Graph RAG Process</h6>
-                <ol>
-                    <li>Document parsing and text extraction</li>
-                    <li>Split into larger, context-rich chunks</li>
-                    <li>Extract entities and relationships using Gemini</li>
-                    <li>Build knowledge graph with NetworkX</li>
-                    <li>Generate embeddings for graph elements</li>
-                    <li>Store both docs and graph in Qdrant</li>
-                    <li>Query both collections for hybrid results</li>
-                    <li>Generate context-aware answer with Claude</li>
-                </ol>
+                <h6>Zero Browser Exposure</h6>
+                <p class="text-muted small">Sensitive fields are stripped from every template context before rendering. Key values never appear in page source, network responses, or browser DevTools.</p>
+            </div>
+            <div class="col-md-6">
+                <h6>No Logging</h6>
+                <p class="text-muted small">Key values are never written to application logs — only field names are logged (e.g. "gemini_api_key updated"), never values.</p>
+            </div>
+            <div class="col-md-6">
+                <h6>Masked Form Fields</h6>
+                <p class="text-muted small">The setup form never pre-fills key inputs. Fields show "Already set — leave blank to keep" when a key exists, so values never transit to the browser.</p>
             </div>
         </div>
     </div>
 </div>
 
-<!-- NEW: Add Graph RAG Technical Details -->
+<!-- About -->
 <div class="card mb-4">
     <div class="card-header">
-        <h5>Graph RAG Technical Details</h5>
+        <h5>About SimpleRAGx</h5>
     </div>
     <div class="card-body">
-        <h6>Entity Extraction</h6>
-        <p>Uses Gemini Pro to identify and categorize entities (PERSON, ORGANIZATION, CONCEPT, LOCATION, EVENT) from document text with descriptions and relationships.</p>
-        
-        <h6>Knowledge Graph Construction</h6>
-        <p>Builds a NetworkX graph where entities are nodes and relationships are edges, enabling graph traversal and neighborhood analysis for enhanced context retrieval.</p>
-        
-        <h6>Hybrid Search Strategy</h6>
-        <p>Combines traditional semantic search of document chunks with graph-based entity and relationship retrieval, providing both direct facts and contextual connections.</p>
-        
-        <h6>Enhanced Prompting</h6>
-        <p>Graph RAG generates specialized prompts that include both document context and relevant entities/relationships, enabling more sophisticated reasoning and answer generation.</p>
+        <p>SimpleRAGx is a multi-mode retrieval-augmented generation system with three complementary approaches to document Q&A, all backed by the same hybrid retrieval pipeline:</p>
+        <ul>
+            <li><strong>Normal RAG:</strong> Fast hybrid semantic + keyword search for direct factual queries</li>
+            <li><strong>Graph RAG:</strong> Knowledge graph reasoning for complex relationships and multi-hop questions</li>
+            <li><strong>PageIndex:</strong> Agentic tool-based retrieval — no vector DB required, works directly on document pages</li>
+        </ul>
+        <p class="mb-0 text-muted small">All modes share the same Qdrant backend, Gemini embeddings, and Voyage AI reranker. The retrieval pipeline (query planning → hybrid search → reranking → synthesis) is applied consistently across modes.</p>
     </div>
 </div>
 
-<div class="card mb-4">
-    <div class="card-header">
-        <h5>About Enhanced SimpleRAG</h5>
-    </div>
-    <div class="card-body">
-        <!-- UPDATED: Enhanced description -->
-        <p>Enhanced SimpleRAG extends the original system with Graph RAG capabilities, providing two complementary approaches to document Q&A:</p>
-        
-        <ul>
-            <li><strong>Normal RAG:</strong> Fast, efficient semantic search perfect for direct factual queries</li>
-            <li><strong>Graph RAG:</strong> Advanced knowledge graph reasoning ideal for understanding relationships and complex connections</li>
-        </ul>
-        
-        <p>Both modes use the same Gemini API key for embeddings and Claude for answer generation, with Qdrant storing the vector representations. The system automatically handles the complexity of entity extraction, graph construction, and hybrid retrieval strategies.</p>
-        
-        <p>This dual-mode approach ensures you get the best of both worlds: speed when you need it, and depth when your queries demand sophisticated reasoning about relationships and connections in your documents.</p>
-    </div>
-</div>
 {% endblock %}
