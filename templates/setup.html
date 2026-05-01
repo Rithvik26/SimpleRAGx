@@ -23,16 +23,16 @@
         <div class="card-body">
             <div class="mb-3">
                 <label for="gemini_api_key" class="form-label">Gemini API Key <span class="text-danger">*</span></label>
-                <input type="password" class="form-control" id="gemini_api_key" name="gemini_api_key" 
-                       value="{{ config.gemini_api_key }}" required>
-                <!-- UPDATED: Mention Graph RAG -->
+                <input type="password" class="form-control" id="gemini_api_key" name="gemini_api_key"
+                       placeholder="{% if keys_configured.gemini_api_key %}Already set — leave blank to keep, or paste a new key to replace{% else %}Paste your Gemini API key{% endif %}"
+                       {% if not keys_configured.gemini_api_key %}required{% endif %}>
                 <div class="form-text">Required for embeddings and Graph RAG entity extraction. Get a key from <a href="https://makersuite.google.com/" target="_blank">Google AI Studio</a>.</div>
             </div>
-            
+
             <div class="mb-3">
                 <label for="qdrant_api_key" class="form-label">Qdrant API Key</label>
-                <input type="password" class="form-control" id="qdrant_api_key" name="qdrant_api_key" 
-                       value="{{ config.qdrant_api_key }}">
+                <input type="password" class="form-control" id="qdrant_api_key" name="qdrant_api_key"
+                       placeholder="{% if keys_configured.qdrant_api_key %}Already set — leave blank to keep, or paste a new key to replace{% else %}Paste your Qdrant API key{% endif %}">
                 <div class="form-text">Required for vector database. Get a key from <a href="https://cloud.qdrant.io/" target="_blank">Qdrant Cloud</a>.</div>
             </div>
                 
@@ -46,7 +46,7 @@
             <div class="mb-3">
                 <label for="voyage_api_key" class="form-label">Voyage AI API Key</label>
                 <input type="password" class="form-control" id="voyage_api_key" name="voyage_api_key"
-                       value="{{ config.voyage_api_key }}">
+                       placeholder="{% if keys_configured.voyage_api_key %}Already set — leave blank to keep, or paste a new key to replace{% else %}Optional — paste your Voyage AI key{% endif %}">
                 <div class="form-text">Optional. Enables cross-encoder reranking (+8–15% retrieval accuracy). Get a key from <a href="https://www.voyageai.com" target="_blank">voyageai.com</a>. Leave blank to disable reranking.</div>
             </div>
         </div>
@@ -83,8 +83,8 @@
             
             <div class="mb-3">
                 <label for="neo4j_password" class="form-label">Neo4j Password</label>
-                <input type="password" class="form-control" id="neo4j_password" name="neo4j_password" 
-                       value="{{ config.neo4j_password }}">
+                <input type="password" class="form-control" id="neo4j_password" name="neo4j_password"
+                       placeholder="{% if keys_configured.neo4j_password %}Already set — leave blank to keep, or enter a new password to replace{% else %}Enter your Neo4j password{% endif %}">
                 <div class="form-text">Password for Neo4j authentication</div>
             </div>
             

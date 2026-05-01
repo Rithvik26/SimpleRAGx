@@ -2,6 +2,8 @@
 Configuration management for SimpleRAGx
 """
 
+import base64
+import hashlib
 import os
 import json
 import logging
@@ -9,6 +11,57 @@ from pathlib import Path
 from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
+
+# Fields that contain secrets — encrypted at rest, never sent to the browser
+SENSITIVE_FIELDS = {"gemini_api_key", "qdrant_api_key", "voyage_api_key", "neo4j_password"}
+_ENC_PREFIX = "enc:"
+
+
+def _get_fernet():
+    """Return a Fernet cipher keyed from KEY_ENCRYPTION_SECRET, or None if unset."""
+    secret = os.getenv("KEY_ENCRYPTION_SECRET")
+    if not secret:
+        return None
+    try:
+        from cryptography.fernet import Fernet
+        key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
+        return Fernet(key)
+    except ImportError:
+        logger.warning("cryptography package not installed — keys stored in plaintext")
+        return None
+
+
+def _encrypt_sensitive(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of config with sensitive fields encrypted."""
+    fernet = _get_fernet()
+    if not fernet:
+        return config
+    out = config.copy()
+    for field in SENSITIVE_FIELDS:
+        val = out.get(field)
+        if val and not str(val).startswith(_ENC_PREFIX):
+            out[field] = _ENC_PREFIX + fernet.encrypt(val.encode()).decode()
+    return out
+
+
+def _decrypt_sensitive(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of config with sensitive fields decrypted."""
+    fernet = _get_fernet()
+    out = config.copy()
+    for field in SENSITIVE_FIELDS:
+        val = out.get(field)
+        if val and str(val).startswith(_ENC_PREFIX):
+            if fernet:
+                try:
+                    out[field] = fernet.decrypt(val[len(_ENC_PREFIX):].encode()).decode()
+                except Exception:
+                    logger.error(f"Failed to decrypt {field} — key may have changed; clearing field")
+                    out[field] = ""
+            else:
+                # Encryption was on but KEY_ENCRYPTION_SECRET is now gone; clear the field
+                logger.warning(f"Encrypted value for {field} found but KEY_ENCRYPTION_SECRET is unset; clearing field")
+                out[field] = ""
+    return out
 
 # Enhanced default configuration with Graph RAG options
 DEFAULT_CONFIG = {
@@ -108,8 +161,8 @@ class ConfigManager:
         if not self.force_fresh_start and os.path.exists(self.config_path):
             try:
                 with open(self.config_path, 'r') as f:
-                    saved_config = json.load(f)
-                    
+                    saved_config = _decrypt_sensitive(json.load(f))
+
                     # FIXED: Only merge if setup was completed before
                     if saved_config.get("setup_completed", False) or config.get("setup_completed", False):
                         # Don't overwrite dev_config values
@@ -166,11 +219,11 @@ class ConfigManager:
             
     
     def _save_config(self, config: Dict[str, Any]):
-        """Save configuration to file."""
+        """Save configuration to file with sensitive fields encrypted."""
         try:
             self._ensure_config_dir_exists()
             with open(self.config_path, 'w') as f:
-                json.dump(config, f, indent=2)
+                json.dump(_encrypt_sensitive(config), f, indent=2)
             logger.info(f"Configuration saved to {self.config_path}")
         except IOError as e:
             logger.error(f"Error saving configuration: {e}")

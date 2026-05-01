@@ -14,7 +14,7 @@ from werkzeug.utils import secure_filename
 import uuid
 # Import the modular SimpleRAG components
 from simple_rag import EnhancedSimpleRAG
-from config import get_config_manager
+from config import get_config_manager, SENSITIVE_FIELDS
 from extensions import ProgressTracker
 import time
 import concurrent.futures
@@ -26,6 +26,11 @@ pageindex_query_results = {}
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
+
+
+def _safe_config(config: dict) -> dict:
+    """Strip sensitive fields before passing config to any template."""
+    return {k: v for k, v in config.items() if k not in SENSITIVE_FIELDS}
 app.config['UPLOAD_FOLDER'] = os.path.join(tempfile.gettempdir(), 'simplerag_uploads')
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max upload size
 n8n_config = {
@@ -324,9 +329,9 @@ def home():
     
     current_mode = config.get("rag_mode", "normal")  # Get from config instead
     
-    return render_template('index.html', 
-                          is_configured=is_configured, 
-                          config=config,
+    return render_template('index.html',
+                          is_configured=is_configured,
+                          config=_safe_config(config),
                           current_mode=current_mode)
 
 @app.route('/health')
@@ -422,7 +427,9 @@ def setup():
         
         return redirect(url_for('home'))
     
-    return render_template('setup.html', config=config_manager.get_all())
+    full = config_manager.get_all()
+    keys_configured = {f: bool(full.get(f)) for f in SENSITIVE_FIELDS}
+    return render_template('setup.html', config=_safe_config(full), keys_configured=keys_configured)
 
 @app.route('/agentic')
 def agentic_interface():
@@ -440,7 +447,7 @@ def agentic_interface():
         agentic_stats = simplerag_instance.agentic_service.get_agentic_stats()
     
     return render_template('agentic.html', 
-                          config=config_manager.get_all(),
+                          config=_safe_config(config_manager.get_all()),
                           agentic_available=agentic_available,
                           available_tools=available_tools,
                           agentic_stats=agentic_stats)
@@ -768,7 +775,7 @@ def upload():
             flash(f"Error starting document processing: {e}", 'danger')
             return redirect(request.url)
     
-    return render_template('upload.html', config=config_manager.get_all())
+    return render_template('upload.html', config=_safe_config(config_manager.get_all()))
 
 
 @app.route('/upload/progress')
@@ -833,7 +840,7 @@ def query():
         
         if not question:
             flash('Please enter a question', 'warning')
-            return render_template('query.html', config=config_manager.get_all())
+            return render_template('query.html', config=_safe_config(config_manager.get_all()))
         
         config = get_config_manager().get_all()
         if not config.get("gemini_api_key") or not config.get("qdrant_api_key"):
@@ -851,7 +858,7 @@ def query():
                     'danger'
                 )
                 return render_template('query.html', question=question,
-                                       config=config_manager.get_all())
+                                       config=_safe_config(config_manager.get_all()))
 
             progress_tracker = ProgressTracker(session_id, "query")
             progress_tracker.update(0, 100, status="starting",
@@ -889,7 +896,7 @@ def query():
                 question=question,
                 in_progress=True,
                 pageindex_mode=True,
-                config=config_manager.get_all(),
+                config=_safe_config(config_manager.get_all()),
             )
         # ── End PageIndex query branch ──────────────────────────────────────
 
@@ -916,14 +923,14 @@ def query():
                                     question=question, 
                                     in_progress=True,  # Enable progress tracking
                                     parallel_mode=True,  # Flag for parallel mode
-                                    config=config_manager.get_all())
+                                    config=_safe_config(config_manager.get_all()))
                                     
             except Exception as e:
                 logger.error(f"Error in parallel processing: {e}")
                 flash(f"Error processing parallel query: {e}", 'danger')
                 return render_template('query.html', 
                                     question=question,
-                                    config=config_manager.get_all())
+                                    config=_safe_config(config_manager.get_all()))
                 
         # Original single-mode processing logic
         if query_rag_mode and query_rag_mode in ['normal', 'graph', 'hybrid_neo4j']:
@@ -985,7 +992,7 @@ def query():
                           answer=answer, 
                           in_progress=in_progress,
                           parallel_results=parallel_results,
-                          config=config_manager.get_all())
+                          config=_safe_config(config_manager.get_all()))
 
 def process_parallel_queries_async(question: str, session_id: str):
     """Async wrapper for parallel queries with progress tracking."""
@@ -1124,7 +1131,7 @@ def advanced():
         "graph_ready": simplerag_instance.is_graph_ready() if simplerag_instance else False
     }
     
-    return render_template('advanced.html', config=config, system_status=system_status)
+    return render_template('advanced.html', config=_safe_config(config), system_status=system_status)
 
 
 

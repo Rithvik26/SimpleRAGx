@@ -30,3 +30,5 @@ pdfplumber>=0.10.0
 voyageai>=0.3.7
 # BM25 sparse retrieval for hybrid search
 fastembed>=0.3.0
+# Encrypt sensitive fields at rest (keys in /tmp config file)
+cryptography>=42.0.0
