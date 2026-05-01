@@ -28,3 +28,5 @@ python-pptx>=0.6.21
 pdfplumber>=0.10.0
 # Reranking — Voyage AI cross-encoder (replaces Gemini LLM-based reranker)
 voyageai>=0.3.7
+# BM25 sparse retrieval for hybrid search
+fastembed>=0.3.0
